@@ -1,0 +1,172 @@
+//@version=6
+indicator("Imbalances — VI + Gap (single TF)", "Imbalances", overlay = true, max_boxes_count = 500)
+
+// =====================================================================
+//  Volume Imbalances + Gaps, on ONE timeframe of your choice.
+//    VI  - volume imbalance: body gap between close[1] and open, with the
+//          candle ranges still overlapping (wicks touch).
+//    Gap - true opening gap: a full range void between two candles
+//          (no overlap at all).
+//
+//  Timeframe: use the chart TF, or pick a HIGHER TF (mapped onto the
+//  chart by time). Detection is non-repainting (lookahead off; only
+//  confirmed bars draw). When a non-chart TF is used, each zone is
+//  tagged on its right side (e.g. 1M, WK, 1D, 4H).
+//
+//  A zone is deleted once price trades back through it (optional). The
+//  forming bar can't mitigate its own zone.
+// =====================================================================
+
+// ------------------------------ TIMEFRAME ----------------------------
+gTF      = "Timeframe"
+useChart = input.bool(true, "Use chart timeframe", group = gTF)
+tfSel    = input.timeframe("240", "Higher timeframe", group = gTF, tooltip = "Used only when 'Use chart timeframe' is off. Must be HIGHER than the chart timeframe; it is projected onto the chart by time. A TF equal to or lower than the chart is ignored (nothing new is drawn).")
+
+// ------------------------------ TYPES --------------------------------
+gT        = "Imbalance types"
+showVI    = input.bool(true, "Volume imbalance", group = gT)
+showGap   = input.bool(true, "Gap imbalance",    group = gT)
+minSize   = input.float(0.0, "Min size (× ATR)", minval = 0, step = 0.05, group = gT, tooltip = "Hide zones smaller than this multiple of ATR(14) on the selected timeframe. 0 = show all. Applies to both VI and Gap.")
+viRemove  = input.bool(true, "Delete VI when filled",  group = gT)
+gapRemove = input.bool(true, "Delete Gap when filled", group = gT)
+
+// ------------------------------ STYLE --------------------------------
+gS         = "Style"
+cViBull    = input.color(color.new(#42a5f5, 82), "VI bull / bear", group = gS, inline = "vi")
+cViBear    = input.color(color.new(#ffa726, 82), "", group = gS, inline = "vi")
+cViBullB   = input.color(color.rgb(66, 165, 245), "", group = gS, inline = "vi")
+cViBearB   = input.color(color.rgb(255, 167, 38), "", group = gS, inline = "vi")
+cGapBull   = input.color(color.new(#ab47bc, 80), "Gap bull / bear", group = gS, inline = "gp")
+cGapBear   = input.color(color.new(#7e57c2, 80), "", group = gS, inline = "gp")
+cGapBullB  = input.color(color.rgb(171, 71, 188), "", group = gS, inline = "gp")
+cGapBearB  = input.color(color.rgb(126, 87, 194), "", group = gS, inline = "gp")
+showBorder = input.bool(false, "Show border", group = gS)
+extBars    = input.int(10, "Extend right (bars)", minval = 0, group = gS)
+maxKeep    = input.int(50, "Max zones kept (per type)", minval = 5, maxval = 500, group = gS)
+
+tf      = useChart ? timeframe.period : tfSel
+higher  = timeframe.in_seconds(tf) > timeframe.in_seconds()
+useTF   = useChart or higher          // custom TF must be strictly higher than the chart
+chartMs = timeframe.in_seconds() * 1000
+
+// Short, readable tag for the selected TF (e.g. 1M, WK, 1D, 4H, 15m).
+// Only shown when a non-chart timeframe is used.
+secTF   = timeframe.in_seconds(tf)
+tagTxt  = secTF >= 2592000 ? str.tostring(int(math.round(secTF / 2592000.0))) + "M" : secTF >= 604800 ? "WK" : secTF >= 86400 ? str.tostring(int(math.round(secTF / 86400.0))) + "D" : secTF >= 3600 ? str.tostring(int(math.round(secTF / 3600.0))) + "H" : str.tostring(int(math.round(secTF / 60.0))) + "m"
+zoneTag = useChart ? "" : tagTxt
+
+// ------------------------------ STATE --------------------------------
+var array<box>  viB    = array.new<box>()
+var array<bool> viBull = array.new<bool>()   // true = bullish
+var array<int>  viMade = array.new<int>()
+
+var array<box>  gpB    = array.new<box>()
+var array<bool> gpBull = array.new<bool>()
+var array<int>  gpMade = array.new<int>()
+
+// ------------------------------ DETECTION ----------------------------
+detectIMB() =>
+    atr = ta.atr(14)
+    // Volume imbalance: body gap (close[1] vs open) with range overlap.
+    bullVI = open > close[1] and low <= high[1] and (open - close[1]) > minSize * atr
+    bearVI = open < close[1] and high >= low[1] and (close[1] - open) > minSize * atr
+    float viBT = bullVI ? open     : na
+    float viBB = bullVI ? close[1] : na
+    int   viBX = bullVI ? time[1]  : na
+    float viST = bearVI ? close[1] : na
+    float viSB = bearVI ? open     : na
+    int   viSX = bearVI ? time[1]  : na
+    // Gap: full range void (no overlap).
+    bullGap = low > high[1] and (low - high[1]) > minSize * atr
+    bearGap = high < low[1] and (low[1] - high) > minSize * atr
+    float gBT = bullGap ? low     : na
+    float gBB = bullGap ? high[1] : na
+    int   gBX = bullGap ? time[1] : na
+    float gST = bearGap ? low[1]  : na
+    float gSB = bearGap ? high    : na
+    int   gSX = bearGap ? time[1] : na
+    [viBT, viBB, viBX, viST, viSB, viSX, gBT, gBB, gBX, gST, gSB, gSX]
+
+[viBT, viBB, viBX, viST, viSB, viSX, gBT, gBB, gBX, gST, gSB, gSX] = request.security(syminfo.tickerid, tf, detectIMB(), lookahead = barmerge.lookahead_off)
+
+// ------------------------------ HELPERS ------------------------------
+rightT() => time + (extBars + 1) * chartMs
+
+// Right-side TF label inside a box (only when a non-chart TF is used).
+setTag(box b, color c) =>
+    if zoneTag != ""
+        box.set_text(b, zoneTag + " ")
+        box.set_text_size(b, size.tiny)
+        box.set_text_formatting(b, text.format_bold)
+        box.set_text_color(b, color.new(c, 0))
+        box.set_text_halign(b, text.align_right)
+        box.set_text_valign(b, text.align_center)
+
+addZone(array<box> ab, array<bool> ad, array<int> am, float top, float bot, int leftT, bool isBull, color bg, color bcol) =>
+    b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = bg)
+    setTag(b, bcol)
+    array.push(ab, b)
+    array.push(ad, isBull)
+    array.push(am, time)
+    while array.size(ab) > maxKeep
+        box.delete(array.shift(ab))
+        array.shift(ad)
+        array.shift(am)
+
+addVI(float top, float bot, int leftT, bool isBull) =>
+    addZone(viB, viBull, viMade, top, bot, leftT, isBull, isBull ? cViBull : cViBear, isBull ? cViBullB : cViBearB)
+
+addGap(float top, float bot, int leftT, bool isBull) =>
+    addZone(gpB, gpBull, gpMade, top, bot, leftT, isBull, isBull ? cGapBull : cGapBear, isBull ? cGapBullB : cGapBearB)
+
+// ------------------------------ DRAW ---------------------------------
+if barstate.isconfirmed and useTF
+    if showVI and not na(viBX) and (na(viBX[1]) or viBX != viBX[1])
+        addVI(viBT, viBB, viBX, true)
+    if showVI and not na(viSX) and (na(viSX[1]) or viSX != viSX[1])
+        addVI(viST, viSB, viSX, false)
+    if showGap and not na(gBX) and (na(gBX[1]) or gBX != gBX[1])
+        addGap(gBT, gBB, gBX, true)
+    if showGap and not na(gSX) and (na(gSX[1]) or gSX != gSX[1])
+        addGap(gST, gSB, gSX, false)
+
+// Warn when a custom TF isn't higher than the chart.
+if barstate.islast and not useChart and not higher
+    var label warn = na
+    label.delete(warn)
+    warn := label.new(bar_index, high, "Imbalances: selected TF must be higher than the chart", style = label.style_label_down, color = color.new(color.orange, 10), textcolor = color.white, size = size.small)
+
+// ----------------------- EXTEND + MITIGATE ---------------------------
+rT = rightT()
+
+// ---- VI ----
+if array.size(viB) > 0
+    i = array.size(viB) - 1
+    while i >= 0
+        bx   = array.get(viB, i)
+        bull = array.get(viBull, i)
+        made = array.get(viMade, i)
+        box.set_right(bx, rT)
+        filled = time > made and (bull ? low <= box.get_bottom(bx) : high >= box.get_top(bx))
+        if viRemove and filled
+            box.delete(bx)
+            array.remove(viB, i)
+            array.remove(viBull, i)
+            array.remove(viMade, i)
+        i -= 1
+
+// ---- Gap ----
+if array.size(gpB) > 0
+    i = array.size(gpB) - 1
+    while i >= 0
+        bx   = array.get(gpB, i)
+        bull = array.get(gpBull, i)
+        made = array.get(gpMade, i)
+        box.set_right(bx, rT)
+        filled = time > made and (bull ? low <= box.get_bottom(bx) : high >= box.get_top(bx))
+        if gapRemove and filled
+            box.delete(bx)
+            array.remove(gpB, i)
+            array.remove(gpBull, i)
+            array.remove(gpMade, i)
+        i -= 1
