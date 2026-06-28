@@ -17,7 +17,7 @@ indicator("Fair Value Gaps (single TF)", "FVG", overlay = true, max_boxes_count 
 // ------------------------------ TIMEFRAME ----------------------------
 gTF      = "Timeframe"
 useChart = input.bool(true, "Use chart timeframe", group = gTF)
-tfSel    = input.timeframe("60", "Other timeframe", group = gTF, tooltip = "Used only when 'Use chart timeframe' is off. Higher TFs are projected onto the chart by time.")
+tfSel    = input.timeframe("240", "Higher timeframe", group = gTF, tooltip = "Used only when 'Use chart timeframe' is off. Must be HIGHER than the chart timeframe; it is projected onto the chart by time. A TF equal to or lower than the chart is ignored (nothing new is drawn).")
 
 // ------------------------------ FVG ----------------------------------
 gT           = "FVG"
@@ -37,6 +37,8 @@ extBars    = input.int(10, "Extend right (bars)", minval = 0, group = gS)
 maxKeep    = input.int(50, "Max FVGs kept", minval = 5, maxval = 500, group = gS)
 
 tf      = useChart ? timeframe.period : tfSel
+higher  = timeframe.in_seconds(tf) > timeframe.in_seconds()
+useTF   = useChart or higher          // custom TF must be strictly higher than the chart
 chartMs = timeframe.in_seconds() * 1000
 
 // ------------------------------ STATE --------------------------------
@@ -74,11 +76,17 @@ addBox(float top, float bot, int leftT, bool isBull) =>
         array.shift(fMade)
 
 // ------------------------------ DRAW ---------------------------------
-if barstate.isconfirmed
+if barstate.isconfirmed and useTF
     if showBull and not na(buX) and (na(buX[1]) or buX != buX[1])
         addBox(buT, buB, buX, true)
     if showBear and not na(beX) and (na(beX[1]) or beX != beX[1])
         addBox(beT, beB, beX, false)
+
+// Warn when a custom TF isn't higher than the chart.
+if barstate.islast and not useChart and not higher
+    var label warn = na
+    label.delete(warn)
+    warn := label.new(bar_index, high, "FVG: selected TF must be higher than the chart", style = label.style_label_down, color = color.new(color.orange, 10), textcolor = color.white, size = size.small)
 
 // ----------------------- EXTEND + MITIGATE ---------------------------
 rT = rightT()
