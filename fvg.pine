@@ -1,0 +1,98 @@
+//@version=6
+indicator("Fair Value Gaps (single TF)", "FVG", overlay = true, max_boxes_count = 500)
+
+// =====================================================================
+//  Fair Value Gaps only, on ONE timeframe of your choice.
+//    FVG - 3-candle fair value gap (candle 1's wick doesn't overlap
+//          candle 3's wick, leaving an imbalance around candle 2).
+//
+//  Timeframe: use the chart TF, or pick any other TF (higher or lower).
+//  Higher-TF gaps are mapped onto the chart by time. Detection is
+//  non-repainting (lookahead off; only confirmed bars draw).
+//
+//  Lifecycle: a gap is deleted once price fully trades back through it
+//  (optional). The forming bar can't mitigate its own gap.
+// =====================================================================
+
+// ------------------------------ TIMEFRAME ----------------------------
+gTF      = "Timeframe"
+useChart = input.bool(true, "Use chart timeframe", group = gTF)
+tfSel    = input.timeframe("60", "Other timeframe", group = gTF, tooltip = "Used only when 'Use chart timeframe' is off. Higher TFs are projected onto the chart by time.")
+
+// ------------------------------ FVG ----------------------------------
+gT           = "FVG"
+showBull     = input.bool(true,  "Show bullish FVG", group = gT)
+showBear     = input.bool(true,  "Show bearish FVG", group = gT)
+minSize      = input.float(0.0, "Min gap size (× ATR)", minval = 0, step = 0.05, group = gT, tooltip = "Hide gaps smaller than this multiple of ATR(14) on the selected timeframe. 0 = show all.")
+removeFilled = input.bool(true,  "Delete FVG when fully filled", group = gT)
+
+// ------------------------------ STYLE --------------------------------
+gS         = "Style"
+cBull      = input.color(color.new(#26a69a, 80), "Bullish fill / border", group = gS, inline = "bu")
+cBullB     = input.color(color.rgb(38, 166, 154), "", group = gS, inline = "bu")
+cBear      = input.color(color.new(#ef5350, 80), "Bearish fill / border", group = gS, inline = "be")
+cBearB     = input.color(color.rgb(239, 83, 80), "", group = gS, inline = "be")
+showBorder = input.bool(false, "Show border", group = gS)
+extBars    = input.int(10, "Extend right (bars)", minval = 0, group = gS)
+maxKeep    = input.int(50, "Max FVGs kept", minval = 5, maxval = 500, group = gS)
+
+tf      = useChart ? timeframe.period : tfSel
+chartMs = timeframe.in_seconds() * 1000
+
+// ------------------------------ STATE --------------------------------
+var array<box>  fB    = array.new<box>()
+var array<bool> fBull = array.new<bool>()   // true = bullish
+var array<int>  fMade = array.new<int>()     // chart time at creation (self-mitigation guard)
+
+// ------------------------------ DETECTION ----------------------------
+detectFVG() =>
+    atr  = ta.atr(14)
+    bull = low > high[2] and (low - high[2]) > minSize * atr
+    bear = high < low[2] and (low[2] - high) > minSize * atr
+    float buT = bull ? low     : na    // bull top
+    float buB = bull ? high[2] : na    // bull bottom
+    int   buX = bull ? time[1] : na    // anchor = middle candle
+    float beT = bear ? low[2]  : na    // bear top
+    float beB = bear ? high    : na    // bear bottom
+    int   beX = bear ? time[1] : na
+    [buT, buB, buX, beT, beB, beX]
+
+[buT, buB, buX, beT, beB, beX] = request.security(syminfo.tickerid, tf, detectFVG(), lookahead = barmerge.lookahead_off)
+
+// ------------------------------ HELPERS ------------------------------
+rightT() => time + (extBars + 1) * chartMs
+
+addBox(float top, float bot, int leftT, bool isBull) =>
+    bcol = isBull ? cBullB : cBearB
+    b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cBull : cBear)
+    array.push(fB, b)
+    array.push(fBull, isBull)
+    array.push(fMade, time)
+    while array.size(fB) > maxKeep
+        box.delete(array.shift(fB))
+        array.shift(fBull)
+        array.shift(fMade)
+
+// ------------------------------ DRAW ---------------------------------
+if barstate.isconfirmed
+    if showBull and not na(buX) and (na(buX[1]) or buX != buX[1])
+        addBox(buT, buB, buX, true)
+    if showBear and not na(beX) and (na(beX[1]) or beX != beX[1])
+        addBox(beT, beB, beX, false)
+
+// ----------------------- EXTEND + MITIGATE ---------------------------
+rT = rightT()
+if array.size(fB) > 0
+    i = array.size(fB) - 1
+    while i >= 0
+        bx   = array.get(fB, i)
+        bull = array.get(fBull, i)
+        made = array.get(fMade, i)
+        box.set_right(bx, rT)
+        filled = time > made and (bull ? low <= box.get_bottom(bx) : high >= box.get_top(bx))
+        if removeFilled and filled
+            box.delete(bx)
+            array.remove(fB, i)
+            array.remove(fBull, i)
+            array.remove(fMade, i)
+        i -= 1
