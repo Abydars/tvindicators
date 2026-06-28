@@ -47,7 +47,7 @@ obBody   = input.bool(false, "Body only (ignore wicks)", group = gOp)
 obRemove = input.bool(true, "Delete OB when mitigated", group = gOp)
 
 gVG = "VI / Gap settings"
-vgFilter  = input.float(0.10, "Min size (× ATR)", minval = 0, step = 0.05, group = gVG, tooltip = "Volume imbalances are frequent; this filters out the tiny ones. Applies to both VI and Gap.")
+vgFilter  = input.float(0.0, "Min size (× ATR)", minval = 0, step = 0.05, group = gVG, tooltip = "Volume imbalances are frequent; raise this to filter out the tiny ones. Scales with ATR(14), so in volatile periods a higher value can hide normal-sized VIs. Applies to both VI and Gap. 0 = show all.")
 viRemove  = input.bool(true, "Delete VI when filled", group = gVG)
 gapRemove = input.bool(true, "Delete Gap when filled", group = gVG)
 
