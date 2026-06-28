@@ -66,6 +66,12 @@ higher  = timeframe.in_seconds(tf) > timeframe.in_seconds()
 useTF   = useChart or higher          // custom TF must be strictly higher than the chart
 chartMs = timeframe.in_seconds() * 1000
 
+// Short, readable tag for the selected TF (e.g. 1M, WK, 1D, 4H, 15m).
+// Only shown when a non-chart timeframe is used.
+secTF  = timeframe.in_seconds(tf)
+tagTxt = secTF >= 2592000 ? str.tostring(int(math.round(secTF / 2592000.0))) + "M" : secTF >= 604800 ? "WK" : secTF >= 86400 ? str.tostring(int(math.round(secTF / 86400.0))) + "D" : secTF >= 3600 ? str.tostring(int(math.round(secTF / 3600.0))) + "H" : str.tostring(int(math.round(secTF / 60.0))) + "m"
+zoneTag = useChart ? "" : tagTxt
+
 // ------------------------------ STATE --------------------------------
 var array<box>  fB    = array.new<box>()
 var array<bool> fBull = array.new<bool>()   // true = bullish
@@ -121,9 +127,20 @@ detectFVG() =>
 // ------------------------------ HELPERS ------------------------------
 rightT() => time + (extBars + 1) * chartMs
 
+// Right-side TF label inside a box (only when a non-chart TF is used).
+setTag(box b, color c) =>
+    if zoneTag != ""
+        box.set_text(b, zoneTag + " ")
+        box.set_text_size(b, size.tiny)
+        box.set_text_formatting(b, text.format_bold)
+        box.set_text_color(b, color.new(c, 0))
+        box.set_text_halign(b, text.align_right)
+        box.set_text_valign(b, text.align_center)
+
 addBox(float top, float bot, int leftT, bool isBull) =>
     bcol = isBull ? cBullB : cBearB
     b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cBull : cBear)
+    setTag(b, bcol)
     array.push(fB, b)
     array.push(fBull, isBull)
     array.push(fMade, time)
@@ -137,6 +154,7 @@ addBox(float top, float bot, int leftT, bool isBull) =>
 addOB(float top, float bot, int leftT, bool isBull) =>
     bcol = isBull ? cObBullB : cObBearB
     b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cObBull : cObBear)
+    setTag(b, bcol)
     array.push(oB, b)
     array.push(oBull, isBull)
     array.push(oMade, time)
