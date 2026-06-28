@@ -1,0 +1,239 @@
+//@version=6
+// Liquidity Candle Borders (MTF) — swing-high (buy-side / upside) and swing-low
+// (sell-side / downside) liquidity levels for the CURRENT timeframe plus up to THREE
+// configurable HIGHER timeframes (e.g. monthly + quarterly + yearly on a weekly chart).
+// Lines extend right until swept; sweeps are detected against current-chart price.
+indicator("Liquidity Candle Borders (MTF)", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+// ─── Current-TF detection ───────────────────────────────────────────────────--
+grpD      = "Current TF — Detection"
+leftBars  = input.int(5, "Pivot Left Bars",  minval = 1, group = grpD)
+rightBars = input.int(5, "Pivot Right Bars", minval = 1, group = grpD)
+
+// ─── Higher timeframes ─────────────────────────────────────────────────────--
+gH    = "Higher timeframes"
+useH1 = input.bool(true,  "HTF 1", group = gH, inline = "h1")
+tfH1  = input.timeframe("1M", "", group = gH, inline = "h1")
+useH2 = input.bool(false, "HTF 2", group = gH, inline = "h2")
+tfH2  = input.timeframe("1W", "", group = gH, inline = "h2")
+useH3 = input.bool(false, "HTF 3", group = gH, inline = "h3")
+tfH3  = input.timeframe("1D", "", group = gH, inline = "h3")
+leftBarsH  = input.int(3, "Pivot L / R", minval = 1, group = gH, inline = "hp")
+rightBarsH = input.int(3, "/",           minval = 1, group = gH, inline = "hp",
+              tooltip = "Shared by all HTFs. An HTF pivot confirms this many HTF bars after it forms. Lower = appears sooner, more noise.")
+
+// ─── Shared sweep / display ───────────────────────────────────────────────────
+grpS       = "Lines"
+sweepBy    = input.string("Wick", "Sweep confirmed by", options = ["Wick", "Close"], group = grpS,
+              tooltip = "Wick: swept the moment price trades through.\nClose: swept only when a candle closes beyond.")
+extendLive = input.bool(true, "Extend until swept", group = grpS)
+keepSwept  = input.bool(true, "Keep swept lines",   group = grpS, tooltip = "Off = delete the line (and its label) once swept.")
+maxLines   = input.int(20, "Max active lines / side (current TF)", minval = 1, maxval = 250, group = grpS)
+maxLinesH  = input.int(10, "Max active lines / side (each HTF)",   minval = 1, maxval = 250, group = grpS)
+showLabels = input.bool(false, "Show BSL / SSL labels", group = grpS)
+
+grpC       = "Colors & Style"
+buyColor   = input.color(color.new(color.red,   0), "Upside (buy-side) color",    group = grpC)
+sellColor  = input.color(color.new(color.green, 0), "Downside (sell-side) color", group = grpC)
+sweptColor = input.color(color.new(color.gray, 50), "Swept color",                group = grpC)
+lineWidth  = input.int(1, "Current-TF line width", minval = 1, maxval = 5, group = grpC)
+styleIn    = input.string("Solid", "Line style", options = ["Solid", "Dashed", "Dotted"], group = grpC)
+lineStyle  = styleIn == "Dashed" ? line.style_dashed : styleIn == "Dotted" ? line.style_dotted : line.style_solid
+
+htfWidth   = 2   // fixed: HTF lines are a touch thicker so the higher-TF layer stands out
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+sweptUp(level)   => sweepBy == "Close" ? close > level : high > level   // buy-side taken
+sweptDown(level) => sweepBy == "Close" ? close < level : low  < level   // sell-side taken
+
+dropLabel(lb) =>
+    if not na(lb)
+        label.delete(lb)
+
+// ════════════════════════════════════════════════════════════════════════════
+// CURRENT TIMEFRAME  (anchored by bar_index)
+// ════════════════════════════════════════════════════════════════════════════
+var array<line>  buyLines   = array.new<line>()
+var array<float> buyLevels  = array.new<float>()
+var array<label> buyLabels  = array.new<label>()
+var array<line>  sellLines  = array.new<line>()
+var array<float> sellLevels = array.new<float>()
+var array<label> sellLabels = array.new<label>()
+
+ph = ta.pivothigh(high, leftBars, rightBars)
+pl = ta.pivotlow(low,  leftBars, rightBars)
+pivotBar = bar_index - rightBars
+
+if not na(ph)
+    ln = line.new(pivotBar, ph, bar_index, ph, color = buyColor, width = lineWidth, style = lineStyle)
+    label lb = na
+    if showLabels
+        lb := label.new(pivotBar, ph, "BSL", style = label.style_label_down, color = color.new(buyColor, 80), textcolor = buyColor, size = size.tiny)
+    array.push(buyLines, ln)
+    array.push(buyLevels, ph)
+    array.push(buyLabels, lb)
+    if array.size(buyLines) > maxLines
+        line.delete(array.shift(buyLines))
+        array.shift(buyLevels)
+        dropLabel(array.shift(buyLabels))
+
+if not na(pl)
+    ln = line.new(pivotBar, pl, bar_index, pl, color = sellColor, width = lineWidth, style = lineStyle)
+    label lb = na
+    if showLabels
+        lb := label.new(pivotBar, pl, "SSL", style = label.style_label_up, color = color.new(sellColor, 80), textcolor = sellColor, size = size.tiny)
+    array.push(sellLines, ln)
+    array.push(sellLevels, pl)
+    array.push(sellLabels, lb)
+    if array.size(sellLines) > maxLines
+        line.delete(array.shift(sellLines))
+        array.shift(sellLevels)
+        dropLabel(array.shift(sellLabels))
+
+if array.size(buyLines) > 0
+    for i = array.size(buyLines) - 1 to 0
+        ln = array.get(buyLines, i)
+        level = array.get(buyLevels, i)
+        swept = sweptUp(level)
+        if swept
+            line.set_x2(ln, bar_index)
+            if keepSwept
+                line.set_color(ln, sweptColor)
+                line.set_style(ln, line.style_dotted)
+            else
+                line.delete(ln)
+                dropLabel(array.get(buyLabels, i))
+            array.remove(buyLines, i)
+            array.remove(buyLevels, i)
+            array.remove(buyLabels, i)
+        if (not swept) and extendLive
+            line.set_x2(ln, bar_index)
+
+if array.size(sellLines) > 0
+    for i = array.size(sellLines) - 1 to 0
+        ln = array.get(sellLines, i)
+        level = array.get(sellLevels, i)
+        swept = sweptDown(level)
+        if swept
+            line.set_x2(ln, bar_index)
+            if keepSwept
+                line.set_color(ln, sweptColor)
+                line.set_style(ln, line.style_dotted)
+            else
+                line.delete(ln)
+                dropLabel(array.get(sellLabels, i))
+            array.remove(sellLines, i)
+            array.remove(sellLevels, i)
+            array.remove(sellLabels, i)
+        if (not swept) and extendLive
+            line.set_x2(ln, bar_index)
+
+// ════════════════════════════════════════════════════════════════════════════
+// HIGHER TIMEFRAMES  (anchored by bar_time so they map onto the LTF chart)
+// ════════════════════════════════════════════════════════════════════════════
+type HtfState
+    array<line>  bl
+    array<float> blv
+    array<label> bla
+    array<line>  sl
+    array<float> slv
+    array<label> sla
+    int lastPh
+    int lastPl
+
+newHtf() =>
+    HtfState.new(array.new<line>(), array.new<float>(), array.new<label>(), array.new<line>(), array.new<float>(), array.new<label>(), na, na)
+
+htfDetect() =>
+    phv = ta.pivothigh(high, leftBarsH, rightBarsH)
+    plv = ta.pivotlow(low,  leftBarsH, rightBarsH)
+    [phv, plv, time[rightBarsH]]
+
+// HTF lines reuse the buy/sell colors above; width is fixed (htfWidth).
+processHtf(HtfState st, bool valid, float phv, float plv, int pTime, string tag) =>
+    // New buy-side (upside) liquidity. na()-guard required: comparing to a na int returns na.
+    if valid and not na(phv) and (na(st.lastPh) or pTime != st.lastPh)
+        st.lastPh := pTime
+        ln = line.new(pTime, phv, time, phv, xloc = xloc.bar_time, color = buyColor, width = htfWidth, style = lineStyle)
+        label lb = na
+        if showLabels
+            lb := label.new(pTime, phv, tag + " BSL", xloc = xloc.bar_time, style = label.style_label_down, color = color.new(buyColor, 80), textcolor = buyColor, size = size.small)
+        array.push(st.bl, ln)
+        array.push(st.blv, phv)
+        array.push(st.bla, lb)
+        if array.size(st.bl) > maxLinesH
+            line.delete(array.shift(st.bl))
+            array.shift(st.blv)
+            dropLabel(array.shift(st.bla))
+
+    // New sell-side (downside) liquidity.
+    if valid and not na(plv) and (na(st.lastPl) or pTime != st.lastPl)
+        st.lastPl := pTime
+        ln = line.new(pTime, plv, time, plv, xloc = xloc.bar_time, color = sellColor, width = htfWidth, style = lineStyle)
+        label lb = na
+        if showLabels
+            lb := label.new(pTime, plv, tag + " SSL", xloc = xloc.bar_time, style = label.style_label_up, color = color.new(sellColor, 80), textcolor = sellColor, size = size.small)
+        array.push(st.sl, ln)
+        array.push(st.slv, plv)
+        array.push(st.sla, lb)
+        if array.size(st.sl) > maxLinesH
+            line.delete(array.shift(st.sl))
+            array.shift(st.slv)
+            dropLabel(array.shift(st.sla))
+
+    // Maintain buy-side.
+    if array.size(st.bl) > 0
+        for i = array.size(st.bl) - 1 to 0
+            ln = array.get(st.bl, i)
+            level = array.get(st.blv, i)
+            swept = sweptUp(level)
+            if swept
+                line.set_x2(ln, time)
+                if keepSwept
+                    line.set_color(ln, sweptColor)
+                    line.set_style(ln, line.style_dotted)
+                else
+                    line.delete(ln)
+                    dropLabel(array.get(st.bla, i))
+                array.remove(st.bl, i)
+                array.remove(st.blv, i)
+                array.remove(st.bla, i)
+            if (not swept) and extendLive
+                line.set_x2(ln, time)
+
+    // Maintain sell-side.
+    if array.size(st.sl) > 0
+        for i = array.size(st.sl) - 1 to 0
+            ln = array.get(st.sl, i)
+            level = array.get(st.slv, i)
+            swept = sweptDown(level)
+            if swept
+                line.set_x2(ln, time)
+                if keepSwept
+                    line.set_color(ln, sweptColor)
+                    line.set_style(ln, line.style_dotted)
+                else
+                    line.delete(ln)
+                    dropLabel(array.get(st.sla, i))
+                array.remove(st.sl, i)
+                array.remove(st.slv, i)
+                array.remove(st.sla, i)
+            if (not swept) and extendLive
+                line.set_x2(ln, time)
+
+var s1 = newHtf()
+var s2 = newHtf()
+var s3 = newHtf()
+
+[ph1, pl1, pt1] = request.security(syminfo.tickerid, tfH1, htfDetect(), lookahead = barmerge.lookahead_off)
+[ph2, pl2, pt2] = request.security(syminfo.tickerid, tfH2, htfDetect(), lookahead = barmerge.lookahead_off)
+[ph3, pl3, pt3] = request.security(syminfo.tickerid, tfH3, htfDetect(), lookahead = barmerge.lookahead_off)
+
+chartSec = timeframe.in_seconds(timeframe.period)
+v1 = useH1 and timeframe.in_seconds(tfH1) > chartSec
+v2 = useH2 and timeframe.in_seconds(tfH2) > chartSec
+v3 = useH3 and timeframe.in_seconds(tfH3) > chartSec
+
+processHtf(s1, v1, ph1, pl1, pt1, tfH1)
+processHtf(s2, v2, ph2, pl2, pt2, tfH2)
+processHtf(s3, v3, ph3, pl3, pt3, tfH3)
