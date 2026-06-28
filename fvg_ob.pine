@@ -1,21 +1,25 @@
 //@version=6
-indicator("Fair Value Gaps (single TF)", "FVG", overlay = true, max_boxes_count = 500)
+indicator("FVG + OB (single TF)", "FVG OB", overlay = true, max_boxes_count = 500)
 
 // =====================================================================
-//  Fair Value Gaps only, on ONE timeframe of your choice.
+//  Fair Value Gaps + Order Blocks, on ONE timeframe of your choice.
 //    FVG - 3-candle fair value gap (candle 1's wick doesn't overlap
 //          candle 3's wick, leaving an imbalance around candle 2).
+//    OB  - order block tied to each FVG; the origin candle is either the
+//          first candle of the FVG triple, or a big candle just before it
+//          that engulfs that first candle.
 //
 //  Timeframe: use the chart TF, or pick a HIGHER TF (mapped onto the
 //  chart by time). Detection is non-repainting (lookahead off; only
 //  confirmed bars draw).
 //
-//  Lifecycle:
+//  FVG lifecycle:
 //    fresh     -> price hasn't entered the gap
 //    breakaway -> price entered but didn't fully fill it (recoloured,
 //                 optionally trimmed to the unfilled remainder, kept)
 //    deleted   -> price fully traded back through the gap
-//  The forming bar can't mitigate its own gap.
+//  OB is deleted when mitigated (first touch). The forming bar can't
+//  mitigate its own gap / block.
 // =====================================================================
 
 // ------------------------------ TIMEFRAME ----------------------------
@@ -32,6 +36,14 @@ removeFilled = input.bool(true,  "Delete FVG when fully filled", group = gT)
 bgEnable     = input.bool(true,  "Partial fill → breakaway gap", group = gT, tooltip = "When price enters an FVG but doesn't fully fill it, recolour it as a breakaway gap and keep it. It is only deleted once fully filled.")
 bgShrink     = input.bool(true,  "Trim FVG to the unfilled remainder", group = gT, tooltip = "As price consumes part of the gap, shrink the box to the imbalance that is still open.")
 
+// ------------------------------ ORDER BLOCKS -------------------------
+gOB        = "Order Blocks"
+showOB     = input.bool(true, "Show order blocks", group = gOB)
+obOrigin   = input.string("First FVG candle", "OB origin candle", options = ["First FVG candle", "Big candle before FVG"], group = gOB, tooltip = "Which candle becomes the order block for each FVG. 'First FVG candle' = the first (oldest) candle of the 3-candle FVG. 'Big candle before FVG' = the nearest candle within the lookback before that first candle whose range engulfs the first candle's high and low.")
+obLookback = input.int(7, "Big-candle lookback", minval = 1, maxval = 50, group = gOB, tooltip = "Only for 'Big candle before FVG'. How many candles before the first FVG candle to search for an engulfing big candle.")
+obBody     = input.bool(false, "Body only (ignore wicks)", group = gOB)
+obRemove   = input.bool(true, "Delete OB when mitigated", group = gOB)
+
 // ------------------------------ STYLE --------------------------------
 gS         = "Style"
 cBull      = input.color(color.new(#26a69a, 80), "Bullish fill / border", group = gS, inline = "bu")
@@ -40,10 +52,15 @@ cBear      = input.color(color.new(#ef5350, 80), "Bearish fill / border", group 
 cBearB     = input.color(color.rgb(239, 83, 80), "", group = gS, inline = "be")
 cBgBull    = input.color(color.new(#fbc02d, 78), "Breakaway bull / bear", group = gS, inline = "bg")
 cBgBear    = input.color(color.new(#6d4c41, 78), "", group = gS, inline = "bg")
+cObBull    = input.color(color.new(#2e7d32, 80), "OB bull / bear", group = gS, inline = "ob")
+cObBear    = input.color(color.new(#8e0000, 80), "", group = gS, inline = "ob")
+cObBullB   = input.color(color.rgb(46, 125, 50), "", group = gS, inline = "ob")
+cObBearB   = input.color(color.rgb(142, 0, 0), "", group = gS, inline = "ob")
 showBorder = input.bool(false, "Show border", group = gS)
 extBars    = input.int(10, "Extend right (bars)", minval = 0, group = gS)
-maxKeep    = input.int(50, "Max FVGs kept", minval = 5, maxval = 500, group = gS)
+maxKeep    = input.int(50, "Max zones kept (per type)", minval = 5, maxval = 500, group = gS)
 
+obFirst = obOrigin == "First FVG candle"
 tf      = useChart ? timeframe.period : tfSel
 higher  = timeframe.in_seconds(tf) > timeframe.in_seconds()
 useTF   = useChart or higher          // custom TF must be strictly higher than the chart
@@ -54,6 +71,10 @@ var array<box>  fB    = array.new<box>()
 var array<bool> fBull = array.new<bool>()   // true = bullish
 var array<int>  fMade = array.new<int>()     // chart time at creation (self-mitigation guard)
 var array<int>  fSt   = array.new<int>()     // 0 = fresh, 1 = breakaway
+
+var array<box>  oB    = array.new<box>()
+var array<bool> oBull = array.new<bool>()
+var array<int>  oMade = array.new<int>()
 
 // ------------------------------ DETECTION ----------------------------
 detectFVG() =>
@@ -66,9 +87,34 @@ detectFVG() =>
     float beT = bear ? low[2]  : na    // bear top
     float beB = bear ? high    : na    // bear bottom
     int   beX = bear ? time[1] : na
-    [buT, buB, buX, beT, beB, beX]
+    // ---- order block origin candle (bars back from current) ----
+    int obIdx = na
+    if showOB and (bull or bear)
+        if obFirst
+            obIdx := 2                    // first candle of the FVG triple
+        else
+            // nearest candle within the lookback BEFORE the first FVG
+            // candle whose range engulfs that first candle's high & low
+            for k = 3 to 2 + obLookback
+                if high[k] >= high[2] and low[k] <= low[2]
+                    obIdx := k
+                    break
+    float obT = na
+    float obB = na
+    int   obX = na
+    if not na(obIdx)
+        obT := obBody ? math.max(open[obIdx], close[obIdx]) : high[obIdx]
+        obB := obBody ? math.min(open[obIdx], close[obIdx]) : low[obIdx]
+        obX := time[obIdx]
+    float obBuT = bull ? obT : na
+    float obBuB = bull ? obB : na
+    int   obBuX = bull ? obX : na
+    float obBeT = bear ? obT : na
+    float obBeB = bear ? obB : na
+    int   obBeX = bear ? obX : na
+    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX]
 
-[buT, buB, buX, beT, beB, beX] = request.security(syminfo.tickerid, tf, detectFVG(), lookahead = barmerge.lookahead_off)
+[buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX] = request.security(syminfo.tickerid, tf, detectFVG(), lookahead = barmerge.lookahead_off)
 
 // ------------------------------ HELPERS ------------------------------
 rightT() => time + (extBars + 1) * chartMs
@@ -86,12 +132,27 @@ addBox(float top, float bot, int leftT, bool isBull) =>
         array.shift(fMade)
         array.shift(fSt)
 
+addOB(float top, float bot, int leftT, bool isBull) =>
+    bcol = isBull ? cObBullB : cObBearB
+    b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cObBull : cObBear)
+    array.push(oB, b)
+    array.push(oBull, isBull)
+    array.push(oMade, time)
+    while array.size(oB) > maxKeep
+        box.delete(array.shift(oB))
+        array.shift(oBull)
+        array.shift(oMade)
+
 // ------------------------------ DRAW ---------------------------------
 if barstate.isconfirmed and useTF
     if showBull and not na(buX) and (na(buX[1]) or buX != buX[1])
         addBox(buT, buB, buX, true)
     if showBear and not na(beX) and (na(beX[1]) or beX != beX[1])
         addBox(beT, beB, beX, false)
+    if showOB and not na(obBuX) and (na(obBuX[1]) or obBuX != obBuX[1])
+        addOB(obBuT, obBuB, obBuX, true)
+    if showOB and not na(obBeX) and (na(obBeX[1]) or obBeX != obBeX[1])
+        addOB(obBeT, obBeB, obBeX, false)
 
 // Warn when a custom TF isn't higher than the chart.
 if barstate.islast and not useChart and not higher
@@ -144,3 +205,19 @@ if array.size(fB) > 0
                         box.set_border_color(bx, color.new(cBgBear, 0))
                     array.set(fSt, i, 1)
         i -= 1
+
+// ---- OB: extend + delete when mitigated ----
+if array.size(oB) > 0
+    j = array.size(oB) - 1
+    while j >= 0
+        bx   = array.get(oB, j)
+        bull = array.get(oBull, j)
+        made = array.get(oMade, j)
+        box.set_right(bx, rT)
+        mit = time > made and (bull ? low <= box.get_top(bx) : high >= box.get_bottom(bx))
+        if obRemove and mit
+            box.delete(bx)
+            array.remove(oB, j)
+            array.remove(oBull, j)
+            array.remove(oMade, j)
+        j -= 1
