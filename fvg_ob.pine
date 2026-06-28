@@ -59,7 +59,7 @@ cObBearB   = input.color(color.rgb(142, 0, 0), "", group = gS, inline = "ob")
 showBorder = input.bool(false, "Show border", group = gS)
 extBars    = input.int(10, "Extend right (bars)", minval = 0, group = gS)
 maxKeep    = input.int(50, "Max zones kept (per type)", minval = 5, maxval = 500, group = gS)
-firstLast  = input.bool(false, "Show first & last only", group = gS, tooltip = "Show only the oldest and newest zone of each type (FVG and OB); hide the ones in between. Hidden zones still exist and still mitigate.")
+firstLast  = input.bool(false, "Show first & last only", group = gS, tooltip = "Show only the oldest and newest zone; hide the ones in between. A zone is an FVG together with its OB (counted as one), so both are shown/hidden together. Hidden zones still exist and still mitigate.")
 
 obFirst = obOrigin == "First FVG candle"
 tf      = useChart ? timeframe.period : tfSel
@@ -78,10 +78,12 @@ var array<box>  fB    = array.new<box>()
 var array<bool> fBull = array.new<bool>()   // true = bullish
 var array<int>  fMade = array.new<int>()     // chart time at creation (self-mitigation guard)
 var array<int>  fSt   = array.new<int>()     // 0 = fresh, 1 = breakaway
+var array<int>  fGrp  = array.new<int>()     // zone group = FVG detection anchor (pairs FVG with its OB)
 
 var array<box>  oB    = array.new<box>()
 var array<bool> oBull = array.new<bool>()
 var array<int>  oMade = array.new<int>()
+var array<int>  oGrp  = array.new<int>()     // same group key as the FVG it belongs to
 
 // ------------------------------ DETECTION ----------------------------
 detectFVG() =>
@@ -147,7 +149,7 @@ showBox(box b, bool visible, color bg, color bcol) =>
     if visible and zoneTag != ""
         box.set_text_color(b, color.new(bcol, 0))
 
-addBox(float top, float bot, int leftT, bool isBull) =>
+addBox(float top, float bot, int leftT, bool isBull, int grp) =>
     bcol = isBull ? cBullB : cBearB
     b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cBull : cBear)
     setTag(b, bcol)
@@ -155,34 +157,39 @@ addBox(float top, float bot, int leftT, bool isBull) =>
     array.push(fBull, isBull)
     array.push(fMade, time)
     array.push(fSt, 0)
+    array.push(fGrp, grp)
     while array.size(fB) > maxKeep
         box.delete(array.shift(fB))
         array.shift(fBull)
         array.shift(fMade)
         array.shift(fSt)
+        array.shift(fGrp)
 
-addOB(float top, float bot, int leftT, bool isBull) =>
+addOB(float top, float bot, int leftT, bool isBull, int grp) =>
     bcol = isBull ? cObBullB : cObBearB
     b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cObBull : cObBear)
     setTag(b, bcol)
     array.push(oB, b)
     array.push(oBull, isBull)
     array.push(oMade, time)
+    array.push(oGrp, grp)
     while array.size(oB) > maxKeep
         box.delete(array.shift(oB))
         array.shift(oBull)
         array.shift(oMade)
+        array.shift(oGrp)
 
 // ------------------------------ DRAW ---------------------------------
 if barstate.isconfirmed and useTF
     if showBull and not na(buX) and (na(buX[1]) or buX != buX[1])
-        addBox(buT, buB, buX, true)
+        addBox(buT, buB, buX, true, buX)
     if showBear and not na(beX) and (na(beX[1]) or beX != beX[1])
-        addBox(beT, beB, beX, false)
+        addBox(beT, beB, beX, false, beX)
+    // OB shares the group key of the FVG it belongs to (buX / beX).
     if showOB and not na(obBuX) and (na(obBuX[1]) or obBuX != obBuX[1])
-        addOB(obBuT, obBuB, obBuX, true)
+        addOB(obBuT, obBuB, obBuX, true, buX)
     if showOB and not na(obBeX) and (na(obBeX[1]) or obBeX != obBeX[1])
-        addOB(obBeT, obBeB, obBeX, false)
+        addOB(obBeT, obBeB, obBeX, false, beX)
 
 // Warn when a custom TF isn't higher than the chart.
 if barstate.islast and not useChart and not higher
@@ -253,17 +260,31 @@ if array.size(oB) > 0
         j -= 1
 
 // ----------------------- SHOW FIRST & LAST ONLY ---------------------
+// A zone = an FVG together with its OB (shared group key). Keep only the
+// oldest and newest group visible across both FVG and OB boxes.
 if firstLast
-    nF = array.size(fB)
-    if nF > 0
-        for idx = 0 to nF - 1
+    int gMin = na
+    int gMax = na
+    if array.size(fGrp) > 0
+        for idx = 0 to array.size(fGrp) - 1
+            g = array.get(fGrp, idx)
+            gMin := na(gMin) or g < gMin ? g : gMin
+            gMax := na(gMax) or g > gMax ? g : gMax
+    if array.size(oGrp) > 0
+        for idx = 0 to array.size(oGrp) - 1
+            g = array.get(oGrp, idx)
+            gMin := na(gMin) or g < gMin ? g : gMin
+            gMax := na(gMax) or g > gMax ? g : gMax
+    if array.size(fB) > 0
+        for idx = 0 to array.size(fB) - 1
+            g    = array.get(fGrp, idx)
             bull = array.get(fBull, idx)
             st   = array.get(fSt, idx)
             bg   = bull ? (st == 1 ? cBgBull : cBull)  : (st == 1 ? cBgBear : cBear)
             bcol = bull ? (st == 1 ? color.new(cBgBull, 0) : cBullB) : (st == 1 ? color.new(cBgBear, 0) : cBearB)
-            showBox(array.get(fB, idx), idx == 0 or idx == nF - 1, bg, bcol)
-    nO = array.size(oB)
-    if nO > 0
-        for idx = 0 to nO - 1
+            showBox(array.get(fB, idx), g == gMin or g == gMax, bg, bcol)
+    if array.size(oB) > 0
+        for idx = 0 to array.size(oB) - 1
+            g    = array.get(oGrp, idx)
             bull = array.get(oBull, idx)
-            showBox(array.get(oB, idx), idx == 0 or idx == nO - 1, bull ? cObBull : cObBear, bull ? cObBullB : cObBearB)
+            showBox(array.get(oB, idx), g == gMin or g == gMax, bull ? cObBull : cObBear, bull ? cObBullB : cObBearB)
