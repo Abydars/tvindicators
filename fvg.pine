@@ -6,12 +6,16 @@ indicator("Fair Value Gaps (single TF)", "FVG", overlay = true, max_boxes_count 
 //    FVG - 3-candle fair value gap (candle 1's wick doesn't overlap
 //          candle 3's wick, leaving an imbalance around candle 2).
 //
-//  Timeframe: use the chart TF, or pick any other TF (higher or lower).
-//  Higher-TF gaps are mapped onto the chart by time. Detection is
-//  non-repainting (lookahead off; only confirmed bars draw).
+//  Timeframe: use the chart TF, or pick a HIGHER TF (mapped onto the
+//  chart by time). Detection is non-repainting (lookahead off; only
+//  confirmed bars draw).
 //
-//  Lifecycle: a gap is deleted once price fully trades back through it
-//  (optional). The forming bar can't mitigate its own gap.
+//  Lifecycle:
+//    fresh     -> price hasn't entered the gap
+//    breakaway -> price entered but didn't fully fill it (recoloured,
+//                 optionally trimmed to the unfilled remainder, kept)
+//    deleted   -> price fully traded back through the gap
+//  The forming bar can't mitigate its own gap.
 // =====================================================================
 
 // ------------------------------ TIMEFRAME ----------------------------
@@ -25,6 +29,8 @@ showBull     = input.bool(true,  "Show bullish FVG", group = gT)
 showBear     = input.bool(true,  "Show bearish FVG", group = gT)
 minSize      = input.float(0.0, "Min gap size (× ATR)", minval = 0, step = 0.05, group = gT, tooltip = "Hide gaps smaller than this multiple of ATR(14) on the selected timeframe. 0 = show all.")
 removeFilled = input.bool(true,  "Delete FVG when fully filled", group = gT)
+bgEnable     = input.bool(true,  "Partial fill → breakaway gap", group = gT, tooltip = "When price enters an FVG but doesn't fully fill it, recolour it as a breakaway gap and keep it. It is only deleted once fully filled.")
+bgShrink     = input.bool(true,  "Trim FVG to the unfilled remainder", group = gT, tooltip = "As price consumes part of the gap, shrink the box to the imbalance that is still open.")
 
 // ------------------------------ STYLE --------------------------------
 gS         = "Style"
@@ -32,6 +38,8 @@ cBull      = input.color(color.new(#26a69a, 80), "Bullish fill / border", group 
 cBullB     = input.color(color.rgb(38, 166, 154), "", group = gS, inline = "bu")
 cBear      = input.color(color.new(#ef5350, 80), "Bearish fill / border", group = gS, inline = "be")
 cBearB     = input.color(color.rgb(239, 83, 80), "", group = gS, inline = "be")
+cBgBull    = input.color(color.new(#fbc02d, 78), "Breakaway bull / bear", group = gS, inline = "bg")
+cBgBear    = input.color(color.new(#6d4c41, 78), "", group = gS, inline = "bg")
 showBorder = input.bool(false, "Show border", group = gS)
 extBars    = input.int(10, "Extend right (bars)", minval = 0, group = gS)
 maxKeep    = input.int(50, "Max FVGs kept", minval = 5, maxval = 500, group = gS)
@@ -45,6 +53,7 @@ chartMs = timeframe.in_seconds() * 1000
 var array<box>  fB    = array.new<box>()
 var array<bool> fBull = array.new<bool>()   // true = bullish
 var array<int>  fMade = array.new<int>()     // chart time at creation (self-mitigation guard)
+var array<int>  fSt   = array.new<int>()     // 0 = fresh, 1 = breakaway
 
 // ------------------------------ DETECTION ----------------------------
 detectFVG() =>
@@ -70,10 +79,12 @@ addBox(float top, float bot, int leftT, bool isBull) =>
     array.push(fB, b)
     array.push(fBull, isBull)
     array.push(fMade, time)
+    array.push(fSt, 0)
     while array.size(fB) > maxKeep
         box.delete(array.shift(fB))
         array.shift(fBull)
         array.shift(fMade)
+        array.shift(fSt)
 
 // ------------------------------ DRAW ---------------------------------
 if barstate.isconfirmed and useTF
@@ -96,11 +107,40 @@ if array.size(fB) > 0
         bx   = array.get(fB, i)
         bull = array.get(fBull, i)
         made = array.get(fMade, i)
+        st   = array.get(fSt, i)
         box.set_right(bx, rT)
-        filled = time > made and (bull ? low <= box.get_bottom(bx) : high >= box.get_top(bx))
-        if removeFilled and filled
-            box.delete(bx)
-            array.remove(fB, i)
-            array.remove(fBull, i)
-            array.remove(fMade, i)
+        top = box.get_top(bx)
+        bot = box.get_bottom(bx)
+        if bull
+            if low <= bot                                  // fully filled
+                if removeFilled
+                    box.delete(bx)
+                    array.remove(fB, i)
+                    array.remove(fBull, i)
+                    array.remove(fMade, i)
+                    array.remove(fSt, i)
+            else if bgEnable and time > made and low < top  // partial fill -> breakaway
+                if bgShrink
+                    box.set_top(bx, low)
+                if st == 0
+                    box.set_bgcolor(bx, cBgBull)
+                    if showBorder
+                        box.set_border_color(bx, color.new(cBgBull, 0))
+                    array.set(fSt, i, 1)
+        else
+            if high >= top                                 // fully filled
+                if removeFilled
+                    box.delete(bx)
+                    array.remove(fB, i)
+                    array.remove(fBull, i)
+                    array.remove(fMade, i)
+                    array.remove(fSt, i)
+            else if bgEnable and time > made and high > bot // partial fill -> breakaway
+                if bgShrink
+                    box.set_bottom(bx, high)
+                if st == 0
+                    box.set_bgcolor(bx, cBgBear)
+                    if showBorder
+                        box.set_border_color(bx, color.new(cBgBear, 0))
+                    array.set(fSt, i, 1)
         i -= 1
