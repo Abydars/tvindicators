@@ -94,7 +94,9 @@ detectFVG() =>
             obIdx := 2                    // first candle of the FVG triple
         else
             // nearest candle within the lookback BEFORE the first FVG
-            // candle whose range engulfs that first candle's high & low
+            // candle whose range engulfs that first candle's high & low;
+            // fall back to the first FVG candle if none is found
+            obIdx := 2
             for k = 3 to 2 + obLookback
                 if high[k] >= high[2] and low[k] <= low[2]
                     obIdx := k
