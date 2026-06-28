@@ -1,0 +1,358 @@
+//@version=6
+indicator("FVG + OB + VI + Gap MTF [SMC]", "Imbalances MTF", overlay = true, max_boxes_count = 500)
+
+// =====================================================================
+//  Marks four imbalance/structure types on the chart TF and up to three
+//  higher timeframes, projected onto the chart by time:
+//    FVG  - 3-candle fair value gap
+//    OB   - order block at a break of structure
+//    VI   - volume imbalance: body gap (close[1] vs open) with range overlap
+//    Gap  - true opening gap: full range void (no overlap)
+//
+//  FVG lifecycle:
+//    fresh     -> price hasn't entered the gap
+//    breakaway -> price entered but did NOT fully fill it (recoloured,
+//                 optionally trimmed to the unfilled remainder, kept)
+//    deleted   -> price fully traded back through the gap
+// =====================================================================
+
+// ------------------------------ INPUTS -------------------------------
+gC = "Current timeframe"
+showTF = input.bool(true, "Show current-TF zones", group = gC)
+
+gH = "Higher timeframes"
+useH1 = input.bool(true,  "HTF 1", group = gH, inline = "h1")
+tfH1  = input.timeframe("1M", "", group = gH, inline = "h1")
+useH2 = input.bool(false, "HTF 2", group = gH, inline = "h2")
+tfH2  = input.timeframe("1W", "", group = gH, inline = "h2")
+useH3 = input.bool(false, "HTF 3", group = gH, inline = "h3")
+tfH3  = input.timeframe("1D", "", group = gH, inline = "h3")
+
+gT = "Zone types"
+showFVG = input.bool(true,  "Fair Value Gaps", group = gT)
+showOB  = input.bool(true,  "Order Blocks",    group = gT)
+showVI  = input.bool(true,  "Volume Imbalances", group = gT)
+showGap = input.bool(true,  "Gaps",            group = gT)
+
+gFp = "FVG settings"
+fvgFilter = input.float(0.0, "Min gap size (× ATR)", minval = 0, step = 0.05, group = gFp, tooltip = "Hide gaps smaller than this multiple of ATR(14) on each timeframe. 0 = show all.")
+fvgRemove = input.bool(true, "Delete FVG when fully filled", group = gFp)
+bgEnable  = input.bool(true, "Partial fill -> breakaway gap", group = gFp, tooltip = "When price enters an FVG but doesn't fully fill it, recolour it as a breakaway gap and keep it. It is only deleted once fully filled.")
+bgShrink  = input.bool(true, "Trim FVG to the unfilled remainder", group = gFp, tooltip = "As price consumes part of the gap, shrink the box to the imbalance that is still open.")
+
+gOp = "OB settings"
+obOrigin = input.string("Candle before displacement", "OB origin candle", options = ["Candle before displacement", "Last opposing candle"], group = gOp, tooltip = "Which candle becomes the order block once a break of structure is confirmed. 'Candle before displacement' = the candle right before the breakout (the first candle of the FVG triple). 'Last opposing candle' = the most recent opposite-colour candle within the lookback.")
+obLB     = input.int(5, "Displacement lookback", minval = 1, maxval = 50, group = gOp, tooltip = "Impulse must close beyond the highest high / lowest low of this many prior bars (break of structure) to validate an OB.")
+obBody   = input.bool(false, "Body only (ignore wicks)", group = gOp)
+obRemove = input.bool(true, "Delete OB when mitigated", group = gOp)
+
+gVG = "VI / Gap settings"
+vgFilter  = input.float(0.10, "Min size (× ATR)", minval = 0, step = 0.05, group = gVG, tooltip = "Volume imbalances are frequent; this filters out the tiny ones. Applies to both VI and Gap.")
+viRemove  = input.bool(true, "Delete VI when filled", group = gVG)
+gapRemove = input.bool(true, "Delete Gap when filled", group = gVG)
+
+gS = "Style"
+cFvgBull  = input.color(color.new(#26a69a, 82), "FVG  bull / bear", group = gS, inline = "f")
+cFvgBear  = input.color(color.new(#ef5350, 82), "", group = gS, inline = "f")
+cBgBull   = input.color(color.new(#fbc02d, 78), "Breakaway bull / bear", group = gS, inline = "b")
+cBgBear   = input.color(color.new(#6d4c41, 78), "", group = gS, inline = "b")
+cObBull   = input.color(color.new(#2e7d32, 80), "OB   bull / bear", group = gS, inline = "o")
+cObBear   = input.color(color.new(#8e0000, 80), "", group = gS, inline = "o")
+cViBull   = input.color(color.new(#42a5f5, 82), "VI   bull / bear", group = gS, inline = "v")
+cViBear   = input.color(color.new(#ffa726, 82), "", group = gS, inline = "v")
+cGapBull  = input.color(color.new(#ab47bc, 80), "Gap  bull / bear", group = gS, inline = "g")
+cGapBear  = input.color(color.new(#7e57c2, 80), "", group = gS, inline = "g")
+htfBorder = input.bool(true, "Border + label on HTF zones", group = gS, tooltip = "Outline and tag higher-TF zones so they stand out from current-TF zones.")
+extBars   = input.int(20, "Extend right (bars)", minval = 0, group = gS)
+maxZones  = input.int(50, "Max zones kept (per type)", minval = 10, maxval = 300, group = gS)
+
+obBefore = obOrigin == "Candle before displacement"
+
+// ------------------------------ STATE --------------------------------
+var array<box>  fvgB    = array.new<box>()
+var array<bool> fvgD    = array.new<bool>()
+var array<int>  fvgMade = array.new<int>()
+var array<int>  fvgSt   = array.new<int>()      // 0 = fresh, 1 = breakaway
+
+var array<box>  obB    = array.new<box>()
+var array<bool> obD    = array.new<bool>()
+var array<int>  obMade = array.new<int>()
+
+var array<box>  viB    = array.new<box>()
+var array<bool> viD    = array.new<bool>()
+var array<int>  viMade = array.new<int>()
+
+var array<box>  gpB    = array.new<box>()
+var array<bool> gpD    = array.new<bool>()
+var array<int>  gpMade = array.new<int>()
+
+chartMs = timeframe.in_seconds() * 1000
+
+// ------------------------------ HELPERS ------------------------------
+mkBox(float top, float bot, int leftT, color bg, bool border, color bcol, string tag) =>
+    int rightT = time + (extBars + 1) * chartMs
+    b = box.new(leftT, top, rightT, bot, xloc = xloc.bar_time, border_width = border ? 1 : 0, border_color = border ? bcol : color(na), bgcolor = bg)
+    if border and tag != ""
+        box.set_text(b, " " + tag)
+        box.set_text_size(b, size.tiny)
+        box.set_text_formatting(b, text.format_bold)
+        box.set_text_color(b, color.new(bcol, 0))
+        box.set_text_halign(b, text.align_right)
+        box.set_text_valign(b, text.align_top)
+    b
+
+trimSimple(array<box> ab, array<bool> ad, array<int> am) =>
+    while array.size(ab) > maxZones
+        box.delete(array.shift(ab))
+        array.shift(ad)
+        array.shift(am)
+
+addFVG(float top, float bot, int leftT, bool isBull, string tag) =>
+    bg   = isBull ? cFvgBull : cFvgBear
+    bcol = isBull ? color.rgb(38, 166, 154) : color.rgb(239, 83, 80)
+    b = mkBox(top, bot, leftT, bg, tag != "" and htfBorder, bcol, tag)
+    array.push(fvgB, b)
+    array.push(fvgD, isBull)
+    array.push(fvgMade, time)
+    array.push(fvgSt, 0)
+    while array.size(fvgB) > maxZones
+        box.delete(array.shift(fvgB))
+        array.shift(fvgD)
+        array.shift(fvgMade)
+        array.shift(fvgSt)
+
+addOB(float top, float bot, int leftT, bool isBull, string tag) =>
+    bg   = isBull ? cObBull : cObBear
+    bcol = isBull ? color.rgb(46, 125, 50) : color.rgb(142, 0, 0)
+    border = tag == "" ? true : htfBorder
+    b = mkBox(top, bot, leftT, bg, border, bcol, tag)
+    array.push(obB, b)
+    array.push(obD, isBull)
+    array.push(obMade, time)
+    trimSimple(obB, obD, obMade)
+
+addVI(float top, float bot, int leftT, bool isBull, string tag) =>
+    bg   = isBull ? cViBull : cViBear
+    bcol = isBull ? color.rgb(66, 165, 245) : color.rgb(255, 167, 38)
+    b = mkBox(top, bot, leftT, bg, tag != "" and htfBorder, bcol, tag)
+    array.push(viB, b)
+    array.push(viD, isBull)
+    array.push(viMade, time)
+    trimSimple(viB, viD, viMade)
+
+addGap(float top, float bot, int leftT, bool isBull, string tag) =>
+    bg   = isBull ? cGapBull : cGapBear
+    bcol = isBull ? color.rgb(171, 71, 188) : color.rgb(126, 87, 194)
+    b = mkBox(top, bot, leftT, bg, tag != "" and htfBorder, bcol, tag)
+    array.push(gpB, b)
+    array.push(gpD, isBull)
+    array.push(gpMade, time)
+    trimSimple(gpB, gpD, gpMade)
+
+// ----------------- DETECTION: FVG + OB (any TF) ----------------------
+detectFO() =>
+    atrV = ta.atr(14)
+    bullF = low > high[2]
+    bearF = high < low[2]
+    gU = low - high[2]
+    gD = low[2] - high
+    float fbT = (bullF and gU > fvgFilter * atrV) ? low     : na
+    float fbB = (bullF and gU > fvgFilter * atrV) ? high[2] : na
+    int   fbX = na(fbT) ? na : time[1]
+    float fsT = (bearF and gD > fvgFilter * atrV) ? low[2]  : na
+    float fsB = (bearF and gD > fvgFilter * atrV) ? high    : na
+    int   fsX = na(fsT) ? na : time[1]
+    hh = ta.highest(high, obLB)[1]
+    ll = ta.lowest(low,  obLB)[1]
+    upNew = close > hh and not (close[1] > hh[1])
+    dnNew = close < ll and not (close[1] < ll[1])
+    float obtB = na
+    float obbB = na
+    int   obxB = na
+    if upNew
+        int idx = 0
+        if obBefore
+            idx := 1
+        else
+            for i = 1 to obLB
+                if close[i] < open[i]
+                    idx := i
+                    break
+        if idx > 0
+            obtB := obBody ? math.max(open[idx], close[idx]) : high[idx]
+            obbB := obBody ? math.min(open[idx], close[idx]) : low[idx]
+            obxB := time[idx]
+    float obtS = na
+    float obbS = na
+    int   obxS = na
+    if dnNew
+        int idx = 0
+        if obBefore
+            idx := 1
+        else
+            for i = 1 to obLB
+                if close[i] > open[i]
+                    idx := i
+                    break
+        if idx > 0
+            obtS := obBody ? math.max(open[idx], close[idx]) : high[idx]
+            obbS := obBody ? math.min(open[idx], close[idx]) : low[idx]
+            obxS := time[idx]
+    [fbT, fbB, fbX, fsT, fsB, fsX, obtB, obbB, obxB, obtS, obbS, obxS]
+
+// ----------------- DETECTION: VI + Gap (any TF) ----------------------
+detectVG() =>
+    atrV = ta.atr(14)
+    bullVI = open > close[1] and low <= high[1] and (open - close[1]) > vgFilter * atrV
+    bearVI = open < close[1] and high >= low[1] and (close[1] - open) > vgFilter * atrV
+    float viBT = bullVI ? open     : na
+    float viBB = bullVI ? close[1] : na
+    int   viBX = na(viBT) ? na : time[1]
+    float viST = bearVI ? close[1] : na
+    float viSB = bearVI ? open     : na
+    int   viSX = na(viST) ? na : time[1]
+    bullGap = low > high[1] and (low - high[1]) > vgFilter * atrV
+    bearGap = high < low[1] and (low[1] - high) > vgFilter * atrV
+    float gBT = bullGap ? low     : na
+    float gBB = bullGap ? high[1] : na
+    int   gBX = na(gBT) ? na : time[1]
+    float gST = bearGap ? low[1]  : na
+    float gSB = bearGap ? high    : na
+    int   gSX = na(gST) ? na : time[1]
+    [viBT, viBB, viBX, viST, viSB, viSX, gBT, gBB, gBX, gST, gSB, gSX]
+
+// ------------------------- DRAW DISPATCHERS --------------------------
+drawFO(float fbT, float fbB, int fbX, float fsT, float fsB, int fsX, float obtB, float obbB, int obxB, float obtS, float obbS, int obxS, string tag, bool gate) =>
+    if gate
+        if showFVG and not na(fbX) and (na(fbX[1]) or fbX != fbX[1])
+            addFVG(fbT, fbB, fbX, true,  tag)
+        if showFVG and not na(fsX) and (na(fsX[1]) or fsX != fsX[1])
+            addFVG(fsT, fsB, fsX, false, tag)
+        if showOB and not na(obxB) and (na(obxB[1]) or obxB != obxB[1])
+            addOB(obtB, obbB, obxB, true,  tag)
+        if showOB and not na(obxS) and (na(obxS[1]) or obxS != obxS[1])
+            addOB(obtS, obbS, obxS, false, tag)
+
+drawVG(float viBT, float viBB, int viBX, float viST, float viSB, int viSX, float gBT, float gBB, int gBX, float gST, float gSB, int gSX, string tag, bool gate) =>
+    if gate
+        if showVI and not na(viBX) and (na(viBX[1]) or viBX != viBX[1])
+            addVI(viBT, viBB, viBX, true,  tag)
+        if showVI and not na(viSX) and (na(viSX[1]) or viSX != viSX[1])
+            addVI(viST, viSB, viSX, false, tag)
+        if showGap and not na(gBX) and (na(gBX[1]) or gBX != gBX[1])
+            addGap(gBT, gBB, gBX, true,  tag)
+        if showGap and not na(gSX) and (na(gSX[1]) or gSX != gSX[1])
+            addGap(gST, gSB, gSX, false, tag)
+
+// ----------------------- CURRENT-TF DRAWING --------------------------
+if showTF and barstate.isconfirmed
+    [a,b,c,d,e,f,g,h,i,j,k,l] = detectFO()
+    drawFO(a,b,c,d,e,f,g,h,i,j,k,l, "", true)
+    [m,n,o,p,q,r,s,t,u,v,w,x] = detectVG()
+    drawVG(m,n,o,p,q,r,s,t,u,v,w,x, "", true)
+
+// -------------------------- HTF DRAWING ------------------------------
+doHTF(simple bool use, simple string tf) =>
+    higher = timeframe.in_seconds(tf) > timeframe.in_seconds()
+    [a,b,c,d,e,f,g,h,i,j,k,l] = request.security(syminfo.tickerid, tf, detectFO(), lookahead = barmerge.lookahead_off)
+    [m,n,o,p,q,r,s,t,u,v,w,x] = request.security(syminfo.tickerid, tf, detectVG(), lookahead = barmerge.lookahead_off)
+    drawFO(a,b,c,d,e,f,g,h,i,j,k,l, tf, use and higher)
+    drawVG(m,n,o,p,q,r,s,t,u,v,w,x, tf, use and higher)
+
+doHTF(useH1, tfH1)
+doHTF(useH2, tfH2)
+doHTF(useH3, tfH3)
+
+// -------------------- MAINTENANCE: EXTEND + MITIGATE -----------------
+rightT = time + (extBars + 1) * chartMs
+
+// ---- FVG: fresh -> breakaway -> filled ----
+if array.size(fvgB) > 0
+    i = array.size(fvgB) - 1
+    while i >= 0
+        bx   = array.get(fvgB, i)
+        bull = array.get(fvgD, i)
+        made = array.get(fvgMade, i)
+        st   = array.get(fvgSt, i)
+        box.set_right(bx, rightT)
+        top = box.get_top(bx)
+        bot = box.get_bottom(bx)
+        if bull
+            if low <= bot
+                if fvgRemove
+                    box.delete(bx)
+                    array.remove(fvgB, i)
+                    array.remove(fvgD, i)
+                    array.remove(fvgMade, i)
+                    array.remove(fvgSt, i)
+            else if bgEnable and time > made and low < top
+                if bgShrink
+                    box.set_top(bx, low)
+                if st == 0
+                    box.set_bgcolor(bx, cBgBull)
+                    box.set_border_color(bx, color.rgb(251, 192, 45))
+                    array.set(fvgSt, i, 1)
+        else
+            if high >= top
+                if fvgRemove
+                    box.delete(bx)
+                    array.remove(fvgB, i)
+                    array.remove(fvgD, i)
+                    array.remove(fvgMade, i)
+                    array.remove(fvgSt, i)
+            else if bgEnable and time > made and high > bot
+                if bgShrink
+                    box.set_bottom(bx, high)
+                if st == 0
+                    box.set_bgcolor(bx, cBgBear)
+                    box.set_border_color(bx, color.rgb(109, 76, 65))
+                    array.set(fvgSt, i, 1)
+        i -= 1
+
+// ---- OB ----
+if array.size(obB) > 0
+    i = array.size(obB) - 1
+    while i >= 0
+        bx = array.get(obB, i)
+        bull = array.get(obD, i)
+        made = array.get(obMade, i)
+        box.set_right(bx, rightT)
+        mit = time > made and (bull ? low <= box.get_top(bx) : high >= box.get_bottom(bx))
+        if obRemove and mit
+            box.delete(bx)
+            array.remove(obB, i)
+            array.remove(obD, i)
+            array.remove(obMade, i)
+        i -= 1
+
+// ---- VI ----
+if array.size(viB) > 0
+    i = array.size(viB) - 1
+    while i >= 0
+        bx = array.get(viB, i)
+        bull = array.get(viD, i)
+        made = array.get(viMade, i)
+        box.set_right(bx, rightT)
+        filled = time > made and (bull ? low <= box.get_bottom(bx) : high >= box.get_top(bx))
+        if viRemove and filled
+            box.delete(bx)
+            array.remove(viB, i)
+            array.remove(viD, i)
+            array.remove(viMade, i)
+        i -= 1
+
+// ---- Gap ----
+if array.size(gpB) > 0
+    i = array.size(gpB) - 1
+    while i >= 0
+        bx = array.get(gpB, i)
+        bull = array.get(gpD, i)
+        made = array.get(gpMade, i)
+        box.set_right(bx, rightT)
+        filled = time > made and (bull ? low <= box.get_bottom(bx) : high >= box.get_top(bx))
+        if gapRemove and filled
+            box.delete(bx)
+            array.remove(gpB, i)
+            array.remove(gpD, i)
+            array.remove(gpMade, i)
+        i -= 1
