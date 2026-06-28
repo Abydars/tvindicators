@@ -41,8 +41,9 @@ bgEnable  = input.bool(true, "Partial fill -> breakaway gap", group = gFp, toolt
 bgShrink  = input.bool(true, "Trim FVG to the unfilled remainder", group = gFp, tooltip = "As price consumes part of the gap, shrink the box to the imbalance that is still open.")
 
 gOp = "OB settings"
-obOrigin = input.string("Candle before displacement", "OB origin candle", options = ["Candle before displacement", "Last opposing candle"], group = gOp, tooltip = "Which candle becomes the order block once a break of structure is confirmed. 'Candle before displacement' = the candle right before the breakout (the first candle of the FVG triple). 'Last opposing candle' = the most recent opposite-colour candle within the lookback.")
+obOrigin = input.string("Candle before displacement", "OB origin candle", options = ["Candle before displacement", "Last opposing candle", "Big originating candle"], group = gOp, tooltip = "Which candle becomes the order block once a break of structure is confirmed. 'Candle before displacement' = the candle right before the breakout (the first candle of the FVG triple). 'Last opposing candle' = the most recent opposite-colour candle within the lookback. 'Big originating candle' = the nearest large candle (≥ 'Big candle size' × ATR) within the lookback whose range the current candle's low (bull) / high (bear) falls inside — i.e. the big candle the move came out of.")
 obLB     = input.int(5, "Displacement lookback", minval = 1, maxval = 50, group = gOp, tooltip = "Impulse must close beyond the highest high / lowest low of this many prior bars (break of structure) to validate an OB.")
+obBigMult = input.float(1.5, "Big candle size (× ATR)", minval = 0.1, step = 0.1, group = gOp, tooltip = "Only used by the 'Big originating candle' origin. A candle qualifies as 'big' when its high-low range ≥ this multiple of ATR(14).")
 obBody   = input.bool(false, "Body only (ignore wicks)", group = gOp)
 obRemove = input.bool(true, "Delete OB when mitigated", group = gOp)
 
@@ -67,6 +68,7 @@ extBars   = input.int(20, "Extend right (bars)", minval = 0, group = gS)
 maxZones  = input.int(50, "Max zones kept (per type)", minval = 10, maxval = 300, group = gS)
 
 obBefore = obOrigin == "Candle before displacement"
+obBig    = obOrigin == "Big originating candle"
 
 // ------------------------------ STATE --------------------------------
 var array<box>  fvgB    = array.new<box>()
@@ -173,6 +175,11 @@ detectFO() =>
         int idx = 0
         if obBefore
             idx := 1
+        else if obBig
+            for i = 1 to obLB
+                if (high[i] - low[i]) >= obBigMult * atrV and low >= low[i] and low <= high[i]
+                    idx := i
+                    break
         else
             for i = 1 to obLB
                 if close[i] < open[i]
@@ -189,6 +196,11 @@ detectFO() =>
         int idx = 0
         if obBefore
             idx := 1
+        else if obBig
+            for i = 1 to obLB
+                if (high[i] - low[i]) >= obBigMult * atrV and high >= low[i] and high <= high[i]
+                    idx := i
+                    break
         else
             for i = 1 to obLB
                 if close[i] > open[i]
