@@ -1,5 +1,11 @@
 //@version=6
-indicator("FVG + OB v2 (multi TF)", "FVG OB v2", overlay = true, max_boxes_count = 500)
+indicator(
+     "FVG + OB v2 (multi TF)",
+     "FVG OB v2",
+     overlay = true,
+     max_boxes_count = 500,
+     max_lines_count = 500
+)
 
 // =====================================================================
 //  Fair Value Gaps + Order Blocks, on independent timeframes.
@@ -20,14 +26,41 @@ indicator("FVG + OB v2 (multi TF)", "FVG OB v2", overlay = true, max_boxes_count
 // ------------------------------ TIMEFRAMES ---------------------------
 gTF = "Timeframes"
 
-useTF1 = input.bool(true,  "Enable", group = gTF, inline = "tf1")
-tf1    = input.timeframe("15",  "Timeframe 1", group = gTF, inline = "tf1")
+useCurrentTF = input.bool(
+     true,
+     "Current Timeframe",
+     group = gTF
+)
 
-useTF2 = input.bool(true,  "Enable", group = gTF, inline = "tf2")
-tf2    = input.timeframe("60",  "Timeframe 2", group = gTF, inline = "tf2")
+useTF2 = input.bool(
+     true,
+     "Enable",
+     group = gTF,
+     inline = "tf2"
+)
 
-useTF3 = input.bool(true,  "Enable", group = gTF, inline = "tf3")
-tf3    = input.timeframe("240", "Timeframe 3", group = gTF, inline = "tf3")
+tf2 = input.timeframe(
+     "60",
+     "Timeframe 2",
+     group = gTF,
+     inline = "tf2"
+)
+
+useTF3 = input.bool(
+     false,
+     "Enable",
+     group = gTF,
+     inline = "tf3"
+)
+
+tf3 = input.timeframe(
+     "240",
+     "Timeframe 3",
+     group = gTF,
+     inline = "tf3"
+)
+
+tf1 = timeframe.period
 
 // ------------------------------ FVG ----------------------------------
 gT           = "FVG"
@@ -41,6 +74,91 @@ showOB     = input.bool(true, "Show order blocks", group = gOB)
 obOrigin   = input.string("Nearest qualifying big candle within the lookback", "OB origin candle", options = ["First FVG candle", "Nearest qualifying big candle within the lookback"], group = gOB, tooltip = "Which candle becomes the order block for each FVG. 'First FVG candle' = the first (oldest) candle of the 3-candle FVG. 'Nearest qualifying big candle within the lookback' = the nearest candle within the lookback before that first candle whose range engulfs the first candle's high and low.")
 obLookback = input.int(7, "Big-candle lookback", minval = 1, maxval = 50, group = gOB, tooltip = "Only for 'Nearest qualifying big candle within the lookback'. How many candles before the first FVG candle to search for an engulfing big candle.")
 obBody     = input.bool(false, "Body only (ignore wicks)", group = gOB)
+
+showLiquidity = input.bool(
+     true,
+     "Show OB liquidity border",
+     group = gOB
+)
+
+liquidityBullColor = input.color(
+     color.new(#00e676, 0),
+     "Liquidity bull / bear",
+     group = gOB,
+     inline = "liq"
+)
+
+liquidityBearColor = input.color(
+     color.new(#ff1744, 0),
+     "",
+     group = gOB,
+     inline = "liq"
+)
+
+liquidityWidth = input.int(
+     2,
+     "Liquidity border width",
+     minval = 1,
+     maxval = 4,
+     group = gOB
+)
+
+liquidityStyleInput = input.string(
+     "Dashed",
+     "Liquidity border style",
+     options = ["Solid", "Dashed", "Dotted"],
+     group = gOB
+)
+
+liquidityStyle =
+     liquidityStyleInput == "Dashed" ? line.style_dashed :
+     liquidityStyleInput == "Dotted" ? line.style_dotted :
+     line.style_solid
+
+liquiditySwingStrength = input.int(
+     2,
+     "Liquidity swing strength",
+     minval = 1,
+     maxval = 10,
+     group = gOB,
+     tooltip = "Number of candles required on each side of a swing high/low."
+)
+
+liquidityLookback = input.int(
+     50,
+     "Liquidity search lookback",
+     minval = 5,
+     maxval = 200,
+     group = gOB,
+     tooltip = "How far behind the FVG to search for the nearest valid liquidity target."
+)
+
+showLiquidityText = input.bool(
+     true,
+     "Show liquidity timeframe text",
+     group = gOB
+)
+
+liquidityTextSizeInput = input.string(
+     "Tiny",
+     "Liquidity text size",
+     options = ["Tiny", "Small"],
+     group = gOB
+)
+
+liquidityTextSize =
+     liquidityTextSizeInput == "Small"
+         ? size.small
+         : size.tiny
+
+sweptLiquidityOpacity = input.int(
+     60,
+     "Swept liquidity opacity",
+     minval = 0,
+     maxval = 100,
+     group = gOB,
+     tooltip = "Transparency applied after liquidity has been swept. 0 = fully visible, 100 = invisible."
+)
 
 // ---------------------- ADDITIONAL IMBALANCES ------------------------
 // Volume / Gap Imbalances are detected on the chart timeframe only.
@@ -102,7 +220,18 @@ cObBull       = input.color(color.new(#2e7d32, 80), "OB bull / bear", group = gS
 cObBear       = input.color(color.new(#8e0000, 80), "", group = gS, inline = "ob")
 cObBullB      = input.color(color.rgb(46, 125, 50), "", group = gS, inline = "ob")
 cObBearB      = input.color(color.rgb(142, 0, 0), "", group = gS, inline = "ob")
+
+filledZoneOpacity = input.int(
+     95,
+     "Filled FVG + OB opacity",
+     minval = 0,
+     maxval = 100,
+     group = gS,
+     tooltip = "Transparency applied to both the FVG and OB after price fully trades through the OB. 0 = fully visible, 100 = invisible."
+)
 showBorder    = input.bool(false, "Show border", group = gS)
+showLabelsCurrent = input.bool(false, "Show FVG + OB labels (Current TF)", group = gS)
+showLabelsOther   = input.bool(true, "Show FVG + OB labels (Other TFs)", group = gS)
 extBars       = input.int(10, "Extend right (bars)", minval = 0, group = gS)
 maxKeepBull   = input.int(5, "Max bullish zones kept", minval = 1, maxval = 15, group = gS, tooltip = "Per timeframe. Each kept zone draws up to 2 boxes (FVG + OB). Capped so the combined box count across all zone types and timeframes stays within the 500-box pool (max_boxes_count).")
 maxKeepBear   = input.int(5, "Max bearish zones kept", minval = 1, maxval = 15, group = gS)
@@ -115,7 +244,7 @@ chartMs = timeframe.in_seconds() * 1000
 
 // Right-extension measured in each zone's OWN timeframe bars (not chart bars),
 // so "Extend right (bars)" looks consistent across timeframes.
-extMs1 = timeframe.in_seconds(tf1) * 1000
+extMs1 = chartMs
 extMs2 = timeframe.in_seconds(tf2) * 1000
 extMs3 = timeframe.in_seconds(tf3) * 1000
 
@@ -129,6 +258,13 @@ var array<box>  oB    = array.new<box>()
 var array<bool> oBull = array.new<bool>()
 var array<int>  oGrp  = array.new<int>()
 var array<int>  oSlot = array.new<int>()
+var array<int>  oMade   = array.new<int>()
+var array<bool> oFilled = array.new<bool>()
+var array<line> oLiquidity = array.new<line>()
+var array<label> oLiquidityLabel = array.new<label>()
+var array<float> oLiquidityPrice = array.new<float>()
+var array<bool>  oLiquiditySwept = array.new<bool>()
+var array<bool>  oTouched = array.new<bool>()
 
 // Volume Imbalance state
 var array<box>  viB    = array.new<box>()
@@ -143,7 +279,14 @@ var array<int>  giTime = array.new<int>()
 var array<int>  giSlot = array.new<int>()
 
 // ------------------------------ DETECTION ----------------------------
-detectZones(float mSz, bool obF, int obL, bool obBdy) =>
+detectZones(
+     float mSz,
+     bool obF,
+     int obL,
+     bool obBdy,
+     int liqStrength,
+     int liqLookback
+) =>
     atr  = ta.atr(14)
     
     // FVG detection
@@ -208,11 +351,73 @@ detectZones(float mSz, bool obF, int obL, bool obBdy) =>
     float obBeB = bearFVG ? obB : na
     int   obBeX = bearFVG ? obX : na
 
-    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX]
+    // ---------------------------------------------------------
+    // External unswept liquidity target
+    // Bullish OB -> nearest unswept swing high above the OB.
+    // Bearish OB -> nearest unswept swing low below the OB.
+    // ---------------------------------------------------------
+    float bullLiquidity = na
+    float bearLiquidity = na
 
-[buT1, buB1, buX1, beT1, beB1, beX1, obBuT1, obBuB1, obBuX1, obBeT1, obBeB1, obBeX1] = request.security(syminfo.tickerid, useTF1 ? tf1 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT2, buB2, buX2, beT2, beB2, beX2, obBuT2, obBuB2, obBuX2, obBeT2, obBeB2, obBeX2] = request.security(syminfo.tickerid, useTF2 ? tf2 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT3, buB3, buX3, beT3, beB3, beX3, obBuT3, obBuB3, obBuX3, obBeT3, obBeB3, obBeX3] = request.security(syminfo.tickerid, useTF3 ? tf3 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+    if bullFVG and not na(obT)
+        for candidateIdx = liqStrength + 1 to liqLookback
+            bool isSwingHigh = true
+
+            // Confirm pivot structure.
+            for offset = 1 to liqStrength
+                if high[candidateIdx] <= high[candidateIdx - offset] or
+                     high[candidateIdx] <= high[candidateIdx + offset]
+                    isSwingHigh := false
+                    break
+
+            // Confirm the swing has not already been swept
+            // between its formation and the current FVG.
+            bool remainsUnswept = true
+
+            if isSwingHigh
+                for newerIdx = 0 to candidateIdx - 1
+                    if high[newerIdx] >= high[candidateIdx]
+                        remainsUnswept := false
+                        break
+
+            if isSwingHigh and
+                 remainsUnswept and
+                 high[candidateIdx] > obT
+                bullLiquidity := high[candidateIdx]
+                break
+
+    if bearFVG and not na(obB)
+        for candidateIdx = liqStrength + 1 to liqLookback
+            bool isSwingLow = true
+
+            // Confirm pivot structure.
+            for offset = 1 to liqStrength
+                if low[candidateIdx] >= low[candidateIdx - offset] or
+                     low[candidateIdx] >= low[candidateIdx + offset]
+                    isSwingLow := false
+                    break
+
+            // Confirm the swing has not already been swept
+            // between its formation and the current FVG.
+            bool remainsUnswept = true
+
+            if isSwingLow
+                for newerIdx = 0 to candidateIdx - 1
+                    if low[newerIdx] <= low[candidateIdx]
+                        remainsUnswept := false
+                        break
+
+            if isSwingLow and
+                 remainsUnswept and
+                 low[candidateIdx] < obB
+                bearLiquidity := low[candidateIdx]
+                break
+
+    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX, bullLiquidity, bearLiquidity]
+
+[buT1, buB1, buX1, beT1, beB1, beX1, obBuT1, obBuB1, obBuX1, obBeT1, obBeB1, obBeX1, bullLiq1, bearLiq1] = detectZones(minSize, obFirst, obLookback, obBody, liquiditySwingStrength, liquidityLookback)
+[buT2, buB2, buX2, beT2, beB2, beX2, obBuT2, obBuB2, obBuX2, obBeT2, obBeB2, obBeX2, bullLiq2, bearLiq2] = request.security(syminfo.tickerid, useTF2 ? tf2 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody, liquiditySwingStrength, liquidityLookback), lookahead = barmerge.lookahead_off)
+[buT3, buB3, buX3, beT3, beB3, beX3, obBuT3, obBuB3, obBuX3, obBeT3, obBeB3, obBeX3, bullLiq3, bearLiq3] = request.security(syminfo.tickerid, useTF3 ? tf3 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody, liquiditySwingStrength, liquidityLookback), lookahead = barmerge.lookahead_off)
 
 // ------------------------------ HELPERS ------------------------------
 rightTForSlot(int slot) =>
@@ -243,16 +448,17 @@ tfLabel(string tf) =>
          str.tostring(int(math.round(sec / 60.0))) + "m"
 
 slotTF(int slot) =>
-    slot == 1 ? tf1 :
+    slot == 1 ? timeframe.period :
      slot == 2 ? tf2 :
      slot == 3 ? tf3 : ""
 
-setWatermark(box b, string txt, color textColor) =>
-    box.set_text(b, txt)
-    box.set_text_size(b, size.small)
+setWatermark(box b, string txt, color textColor, int slot) =>
+    showLabelsForThisSlot = (slot == 1) ? showLabelsCurrent : showLabelsOther
+    box.set_text(b, showLabelsForThisSlot ? txt : "")
+    box.set_text_size(b, size.tiny)
     box.set_text_formatting(b, text.format_bold)
-    box.set_text_color(b, color.new(textColor, 35))
-    box.set_text_halign(b, text.align_center)
+    box.set_text_color(b, color.new(textColor, 25))
+    box.set_text_halign(b, text.align_right)
     box.set_text_valign(b, text.align_center)
 
 setGapWatermark(box b, string txt, color textColor) =>
@@ -268,7 +474,8 @@ showBox(
      bool visible,
      color bg,
      color bcol,
-     string watermark
+     string watermark,
+     bool showLabelsForThisSlot
 ) =>
     box.set_bgcolor(b, visible ? bg : color(na))
     box.set_border_color(
@@ -276,13 +483,13 @@ showBox(
          visible and showBorder ? bcol : color(na)
     )
 
-    box.set_text(b, visible ? watermark : "")
+    box.set_text(b, visible and showLabelsForThisSlot ? watermark : "")
 
-    if visible
-        box.set_text_size(b, size.small)
+    if visible and showLabelsForThisSlot
+        box.set_text_size(b, size.tiny)
         box.set_text_formatting(b, text.format_bold)
-        box.set_text_color(b, color.new(bcol, 35))
-        box.set_text_halign(b, text.align_center)
+        box.set_text_color(b, color.new(bcol, 25))
+        box.set_text_halign(b, text.align_right)
         box.set_text_valign(b, text.align_center)
 
 hasGapForSlot(
@@ -301,6 +508,19 @@ hasGapForSlot(
                 break
 
     found
+
+isZoneFilled(int grp, int slot) =>
+    bool result = false
+
+    if array.size(oGrp) > 0
+        for i = 0 to array.size(oGrp) - 1
+            if array.get(oGrp, i) == grp and
+                 array.get(oSlot, i) == slot and
+                 array.get(oFilled, i)
+                result := true
+                break
+
+    result
 
 addFVG(
      float top,
@@ -324,7 +544,7 @@ addFVG(
          bgcolor = isBull ? cBull : cBear
     )
 
-    setWatermark(b, tfText + " FVG", bcol)
+    setWatermark(b, tfText + " FVG", bcol, slot)
 
     array.push(fB, b)
     array.push(fBull, isBull)
@@ -338,7 +558,8 @@ addOB(
      bool isBull,
      int grp,
      int slot,
-     string tfText
+     string tfText,
+     float liquidityPrice
 ) =>
     bcol = isBull ? cObBullB : cObBearB
 
@@ -353,12 +574,52 @@ addOB(
          bgcolor = isBull ? cObBull : cObBear
     )
 
-    setWatermark(b, tfText + " OB", bcol)
+    setWatermark(b, tfText + " OB", bcol, slot)
+
+    liquidityColor = isBull
+         ? liquidityBullColor
+         : liquidityBearColor
+
+    liquidityLine = line.new(
+         leftT,
+         na(liquidityPrice) ? top : liquidityPrice,
+         rightTForSlot(slot),
+         na(liquidityPrice) ? top : liquidityPrice,
+         xloc = xloc.bar_time,
+         extend = extend.none,
+         color = showLiquidity and not na(liquidityPrice)
+              ? liquidityColor
+              : color(na),
+         style = liquidityStyle,
+         width = liquidityWidth
+    )
+
+    liquidityLabel = label.new(
+         rightTForSlot(slot),
+         na(liquidityPrice) ? top : liquidityPrice,
+         tfText + " Liquidity",
+         xloc = xloc.bar_time,
+         style = label.style_label_left,
+         color = color.new(color.black, 100),
+         textcolor = showLiquidity and
+              showLiquidityText and
+              not na(liquidityPrice)
+                  ? liquidityColor
+                  : color(na),
+         size = liquidityTextSize
+    )
 
     array.push(oB, b)
     array.push(oBull, isBull)
     array.push(oGrp, grp)
     array.push(oSlot, slot)
+    array.push(oMade, time)
+    array.push(oFilled, false)
+    array.push(oLiquidity, liquidityLine)
+    array.push(oLiquidityLabel, liquidityLabel)
+    array.push(oLiquidityPrice, liquidityPrice)
+    array.push(oLiquiditySwept, false)
+    array.push(oTouched, false)
 
 addVI(
      float top,
@@ -438,7 +699,9 @@ processTF(
      int bullObTime,
      float bearObTop,
      float bearObBot,
-     int bearObTime
+     int bearObTime,
+     float bullLiquidity,
+     float bearLiquidity
 ) =>
     label = tfLabel(tf)
 
@@ -477,7 +740,8 @@ processTF(
                  true,
                  bullGrp,
                  slot,
-                 label
+                 label,
+                 bullLiquidity
             )
 
         if showOB and showBear and not na(bearObTime) and
@@ -489,33 +753,97 @@ processTF(
                  false,
                  bearGrp,
                  slot,
-                 label
+                 label,
+                 bearLiquidity
             )
+
+// Current/chart timeframe pivots
+newSwingHigh1 = ta.pivothigh(
+     high,
+     liquiditySwingStrength,
+     liquiditySwingStrength
+)
+
+newSwingLow1 = ta.pivotlow(
+     low,
+     liquiditySwingStrength,
+     liquiditySwingStrength
+)
+
+// Timeframe 2 pivots
+[newSwingHigh2, newSwingLow2] = request.security(
+     syminfo.tickerid,
+     tf2,
+     [
+         ta.pivothigh(
+              high,
+              liquiditySwingStrength,
+              liquiditySwingStrength
+         ),
+         ta.pivotlow(
+              low,
+              liquiditySwingStrength,
+              liquiditySwingStrength
+         )
+     ],
+     lookahead = barmerge.lookahead_off
+)
+
+// Timeframe 3 pivots
+[newSwingHigh3, newSwingLow3] = request.security(
+     syminfo.tickerid,
+     tf3,
+     [
+         ta.pivothigh(
+              high,
+              liquiditySwingStrength,
+              liquiditySwingStrength
+         ),
+         ta.pivotlow(
+              low,
+              liquiditySwingStrength,
+              liquiditySwingStrength
+         )
+     ],
+     lookahead = barmerge.lookahead_off
+)
 
 // ------------------------------ EXECUTION ----------------------------
 if barstate.isconfirmed
     processTF(
-         useTF1, 1, tf1,
+         useCurrentTF,
+         1,
+         timeframe.period,
          buT1, buB1, buX1,
          beT1, beB1, beX1,
          obBuT1, obBuB1, obBuX1,
-         obBeT1, obBeB1, obBeX1
+         obBeT1, obBeB1, obBeX1,
+         bullLiq1,
+         bearLiq1
     )
 
     processTF(
-         useTF2, 2, tf2,
+         useTF2,
+         2,
+         tf2,
          buT2, buB2, buX2,
          beT2, beB2, beX2,
          obBuT2, obBuB2, obBuX2,
-         obBeT2, obBeB2, obBeX2
+         obBeT2, obBeB2, obBeX2,
+         bullLiq2,
+         bearLiq2
     )
 
     processTF(
-         useTF3, 3, tf3,
+         useTF3,
+         3,
+         tf3,
          buT3, buB3, buX3,
          beT3, beB3, beX3,
          obBuT3, obBuB3, obBuX3,
-         obBeT3, obBeB3, obBeX3
+         obBeT3, obBeB3, obBeX3,
+         bullLiq3,
+         bearLiq3
     )
 
     // ---- Volume / Gap Imbalances on the CHART timeframe (no security) ----
@@ -604,10 +932,19 @@ if barstate.isconfirmed
                     while idx >= 0
                         if array.get(oGrp, idx) == gToRemove and array.get(oSlot, idx) == s
                             box.delete(array.get(oB, idx))
+                            line.delete(array.get(oLiquidity, idx))
+                            label.delete(array.get(oLiquidityLabel, idx))
                             array.remove(oB, idx)
                             array.remove(oBull, idx)
                             array.remove(oGrp, idx)
                             array.remove(oSlot, idx)
+                            array.remove(oMade, idx)
+                            array.remove(oFilled, idx)
+                            array.remove(oLiquidity, idx)
+                            array.remove(oLiquidityLabel, idx)
+                            array.remove(oLiquidityPrice, idx)
+                            array.remove(oLiquiditySwept, idx)
+                            array.remove(oTouched, idx)
                         idx -= 1
 
         // Prune oldest bearish zones for slot `s`
@@ -634,10 +971,19 @@ if barstate.isconfirmed
                     while idx >= 0
                         if array.get(oGrp, idx) == gToRemove and array.get(oSlot, idx) == s
                             box.delete(array.get(oB, idx))
+                            line.delete(array.get(oLiquidity, idx))
+                            label.delete(array.get(oLiquidityLabel, idx))
                             array.remove(oB, idx)
                             array.remove(oBull, idx)
                             array.remove(oGrp, idx)
                             array.remove(oSlot, idx)
+                            array.remove(oMade, idx)
+                            array.remove(oFilled, idx)
+                            array.remove(oLiquidity, idx)
+                            array.remove(oLiquidityLabel, idx)
+                            array.remove(oLiquidityPrice, idx)
+                            array.remove(oLiquiditySwept, idx)
+                            array.remove(oTouched, idx)
                         idx -= 1
 
     // ---- Pruning for chart Volume / Gap Imbalances (oldest first) ----
@@ -666,6 +1012,16 @@ if array.size(oB) > 0
         bx = array.get(oB, i)
         box.set_right(bx, rightTForSlot(array.get(oSlot, i)))
 
+if array.size(oLiquidity) > 0
+    for i = 0 to array.size(oLiquidity) - 1
+        li     = array.get(oLiquidity, i)
+        lbl    = array.get(oLiquidityLabel, i)
+        slot   = array.get(oSlot, i)
+        rightX = rightTForSlot(slot)
+
+        line.set_x2(li, rightX)
+        label.set_x(lbl, rightX)
+
 if array.size(viB) > 0
     for i = 0 to array.size(viB) - 1
         bx = array.get(viB, i)
@@ -675,6 +1031,151 @@ if array.size(giB) > 0
     for i = 0 to array.size(giB) - 1
         bx = array.get(giB, i)
         box.set_right(bx, rightTForSlot(array.get(giSlot, i)))
+
+// ----------------------- OB FILL STATUS ------------------------------
+if array.size(oB) > 0
+    for idx = 0 to array.size(oB) - 1
+        if not array.get(oFilled, idx)
+            bx   = array.get(oB, idx)
+            bull = array.get(oBull, idx)
+            made = array.get(oMade, idx)
+
+            top = box.get_top(bx)
+            bot = box.get_bottom(bx)
+
+            completelyFilled =
+                 time > made and
+                 (bull ? low <= bot : high >= top)
+
+            if completelyFilled
+                array.set(oFilled, idx, true)
+
+// -------------------- OB TOUCH + LIQUIDITY STATUS -------------------
+if array.size(oB) > 0
+    for idx = 0 to array.size(oB) - 1
+        bx       = array.get(oB, idx)
+        bull     = array.get(oBull, idx)
+        made     = array.get(oMade, idx)
+        top      = box.get_top(bx)
+        bot      = box.get_bottom(bx)
+        touched  = array.get(oTouched, idx)
+        liqPrice = array.get(oLiquidityPrice, idx)
+
+        // Price has entered the OB range.
+        obTapped =
+             time > made and
+             high >= bot and
+             low <= top
+
+        if not touched and obTapped
+            array.set(oTouched, idx, true)
+            touched := true
+
+        slot = array.get(oSlot, idx)
+
+        slotSwingHigh =
+             slot == 1 ? newSwingHigh1 :
+             slot == 2 ? newSwingHigh2 :
+             slot == 3 ? newSwingHigh3 :
+             na
+
+        slotSwingLow =
+             slot == 1 ? newSwingLow1 :
+             slot == 2 ? newSwingLow2 :
+             slot == 3 ? newSwingLow3 :
+             na
+
+        if not touched
+            liquidityLine  = array.get(oLiquidity, idx)
+            liquidityLabel = array.get(oLiquidityLabel, idx)
+
+            // Bullish OB:
+            // Use only a swing high from the OB's own timeframe.
+            // It must also be above the OB.
+            validBullLiquidity =
+                 bull and
+                 not na(slotSwingHigh) and
+                 slotSwingHigh > top
+
+            if validBullLiquidity
+                closerBullTarget =
+                     na(liqPrice) or
+                     slotSwingHigh < liqPrice
+
+                if closerBullTarget
+                    liqPrice := slotSwingHigh
+
+                    array.set(
+                         oLiquidityPrice,
+                         idx,
+                         liqPrice
+                    )
+
+                    line.set_y1(
+                         liquidityLine,
+                         liqPrice
+                    )
+
+                    line.set_y2(
+                         liquidityLine,
+                         liqPrice
+                    )
+
+                    label.set_y(
+                         liquidityLabel,
+                         liqPrice
+                    )
+
+            // Bearish OB:
+            // Use only a swing low from the OB's own timeframe.
+            // It must also be below the OB.
+            validBearLiquidity =
+                 not bull and
+                 not na(slotSwingLow) and
+                 slotSwingLow < bot
+
+            if validBearLiquidity
+                closerBearTarget =
+                     na(liqPrice) or
+                     slotSwingLow > liqPrice
+
+                if closerBearTarget
+                    liqPrice := slotSwingLow
+
+                    array.set(
+                         oLiquidityPrice,
+                         idx,
+                         liqPrice
+                    )
+
+                    line.set_y1(
+                         liquidityLine,
+                         liqPrice
+                    )
+
+                    line.set_y2(
+                         liquidityLine,
+                         liqPrice
+                    )
+
+                    label.set_y(
+                         liquidityLabel,
+                         liqPrice
+                    )
+
+        // Target liquidity is only counted as swept after
+        // price has first returned to the OB.
+        if touched and
+             not array.get(oLiquiditySwept, idx) and
+             not na(liqPrice)
+
+            liquiditySwept =
+                 bull
+                     ? high >= liqPrice
+                     : low <= liqPrice
+
+            if liquiditySwept
+                array.set(oLiquiditySwept, idx, true)
 
 // ----------------------- SHOW FIRST & LAST ONLY ---------------------
 // Reset and calculate min/max group keys per timeframe slot and type.
@@ -725,45 +1226,129 @@ if array.size(fB) > 0
         g    = array.get(fGrp, idx)
         slot = array.get(fSlot, idx)
         bull = array.get(fBull, idx)
-        bg   = bull ? cBull : cBear
-        bcol = bull ? cBullB : cBearB
-        
-        minVal = bull ? array.get(gMinBull, slot) : array.get(gMinBear, slot)
-        maxVal = bull ? array.get(gMaxBull, slot) : array.get(gMaxBear, slot)
+
+        zoneFilled = isZoneFilled(g, slot)
+
+        baseBg   = bull ? cBull : cBear
+        baseBcol = bull ? cBullB : cBearB
+
+        bg =
+             zoneFilled
+                 ? color.new(baseBg, filledZoneOpacity)
+                 : baseBg
+
+        bcol =
+             zoneFilled
+                 ? color.new(baseBcol, filledZoneOpacity)
+                 : baseBcol
+
+        minVal =
+             bull
+                 ? array.get(gMinBull, slot)
+                 : array.get(gMinBear, slot)
+
+        maxVal =
+             bull
+                 ? array.get(gMaxBull, slot)
+                 : array.get(gMaxBear, slot)
+
         firstLast = bull ? firstLastBull : firstLastBear
-        
         visible = not firstLast or (g == minVal or g == maxVal)
         tfText = tfLabel(slotTF(slot))
-        
+
+        showLabelsForThisSlot = (slot == 1) ? showLabelsCurrent : showLabelsOther
         showBox(
              array.get(fB, idx),
              visible,
              bg,
              bcol,
-             tfText + " FVG"
+             tfText + " FVG",
+             showLabelsForThisSlot
         )
 
 if array.size(oB) > 0
     for idx = 0 to array.size(oB) - 1
-        g    = array.get(oGrp, idx)
-        slot = array.get(oSlot, idx)
-        bull = array.get(oBull, idx)
-        bg   = bull ? cObBull : cObBear
-        bcol = bull ? cObBullB : cObBearB
-        
-        minVal = bull ? array.get(gMinBull, slot) : array.get(gMinBear, slot)
-        maxVal = bull ? array.get(gMaxBull, slot) : array.get(gMaxBear, slot)
+        g      = array.get(oGrp, idx)
+        slot   = array.get(oSlot, idx)
+        bull   = array.get(oBull, idx)
+        filled = array.get(oFilled, idx)
+
+        zoneFilled = isZoneFilled(g, slot)
+
+        baseBg   = bull ? cObBull : cObBear
+        baseBcol = bull ? cObBullB : cObBearB
+
+        bg =
+             zoneFilled
+                 ? color.new(baseBg, filledZoneOpacity)
+                 : baseBg
+
+        bcol =
+             zoneFilled
+                 ? color.new(baseBcol, filledZoneOpacity)
+                 : baseBcol
+
+        minVal =
+             bull
+                 ? array.get(gMinBull, slot)
+                 : array.get(gMinBear, slot)
+
+        maxVal =
+             bull
+                 ? array.get(gMaxBull, slot)
+                 : array.get(gMaxBear, slot)
+
         firstLast = bull ? firstLastBull : firstLastBear
-        
         visible = not firstLast or (g == minVal or g == maxVal)
         tfText = tfLabel(slotTF(slot))
-        
+        liquidityLine  = array.get(oLiquidity, idx)
+        liquidityLabel = array.get(oLiquidityLabel, idx)
+        liquidityColor = bull ? liquidityBullColor : liquidityBearColor
+        liquiditySwept = array.get(oLiquiditySwept, idx)
+        liquidityPrice = array.get(oLiquidityPrice, idx)
+
+        showThisLiquidity =
+             visible and
+             showLiquidity and
+             not na(liquidityPrice)
+
+        displayLiquidityColor =
+             liquiditySwept
+                 ? color.new(liquidityColor, sweptLiquidityOpacity)
+                 : liquidityColor
+
+        line.set_color(
+             liquidityLine,
+             showThisLiquidity
+                 ? displayLiquidityColor
+                 : color(na)
+        )
+
+        label.set_text(
+             liquidityLabel,
+             liquiditySwept
+                 ? tfText + " Liquidity ✓"
+                 : tfText + " Liquidity"
+            )
+
+        label.set_textcolor(
+             liquidityLabel,
+             showThisLiquidity and showLiquidityText
+                 ? displayLiquidityColor
+                 : color(na)
+        )
+
+        if not na(liquidityPrice)
+            label.set_y(liquidityLabel, liquidityPrice)
+
+        showLabelsForThisSlot = (slot == 1) ? showLabelsCurrent : showLabelsOther
         showBox(
              array.get(oB, idx),
              visible,
              bg,
              bcol,
-             tfText + " OB"
+             tfText + " OB",
+             showLabelsForThisSlot
         )
 
 if showDebug and barstate.islast
