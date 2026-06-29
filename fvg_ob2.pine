@@ -1,8 +1,8 @@
 //@version=6
-indicator("FVG + OB v2 (single TF)", "FVG OB v2", overlay = true, max_boxes_count = 500)
+indicator("FVG + OB v2 (multi TF)", "FVG OB v2", overlay = true, max_boxes_count = 500)
 
 // =====================================================================
-//  Fair Value Gaps + Order Blocks, on ONE timeframe of your choice.
+//  Fair Value Gaps + Order Blocks, on independent timeframes.
 //    FVG - 3-candle fair value gap (candle 1's wick doesn't overlap
 //          candle 3's wick, leaving an imbalance around candle 2).
 //    OB  - order block tied to each FVG; the origin candle is either the
@@ -13,10 +13,23 @@ indicator("FVG + OB v2 (single TF)", "FVG OB v2", overlay = true, max_boxes_coun
 //  or fully filled.
 // =====================================================================
 
-// ------------------------------ TIMEFRAME ----------------------------
-gTF      = "Timeframe"
-useChart = input.bool(true, "Use chart timeframe", group = gTF)
-tfSel    = input.timeframe("240", "Higher timeframe", group = gTF, tooltip = "Used only when 'Use chart timeframe' is off. Must be HIGHER than the chart timeframe; it is projected onto the chart by time. A TF equal to or lower than the chart is ignored (nothing new is drawn).")
+// ------------------------------ TIMEFRAMES ---------------------------
+gTF = "Timeframes"
+
+useTF1 = input.bool(true,  "Enable", group = gTF, inline = "tf1")
+tf1    = input.timeframe("15",  "Timeframe 1", group = gTF, inline = "tf1")
+
+useTF2 = input.bool(true,  "Enable", group = gTF, inline = "tf2")
+tf2    = input.timeframe("60",  "Timeframe 2", group = gTF, inline = "tf2")
+
+useTF3 = input.bool(true,  "Enable", group = gTF, inline = "tf3")
+tf3    = input.timeframe("240", "Timeframe 3", group = gTF, inline = "tf3")
+
+useTF4 = input.bool(false, "Enable", group = gTF, inline = "tf4")
+tf4    = input.timeframe("D",   "Timeframe 4", group = gTF, inline = "tf4")
+
+useTF5 = input.bool(false, "Enable", group = gTF, inline = "tf5")
+tf5    = input.timeframe("W",   "Timeframe 5", group = gTF, inline = "tf5")
 
 // ------------------------------ FVG ----------------------------------
 gT           = "FVG"
@@ -30,6 +43,54 @@ showOB     = input.bool(true, "Show order blocks", group = gOB)
 obOrigin   = input.string("Nearest qualifying big candle within the lookback", "OB origin candle", options = ["First FVG candle", "Nearest qualifying big candle within the lookback"], group = gOB, tooltip = "Which candle becomes the order block for each FVG. 'First FVG candle' = the first (oldest) candle of the 3-candle FVG. 'Nearest qualifying big candle within the lookback' = the nearest candle within the lookback before that first candle whose range engulfs the first candle's high and low.")
 obLookback = input.int(7, "Big-candle lookback", minval = 1, maxval = 50, group = gOB, tooltip = "Only for 'Nearest qualifying big candle within the lookback'. How many candles before the first FVG candle to search for an engulfing big candle.")
 obBody     = input.bool(false, "Body only (ignore wicks)", group = gOB)
+
+// ---------------------- ADDITIONAL IMBALANCES ------------------------
+gIMB = "Additional Imbalances"
+
+showVI = input.bool(true, "Show Volume Imbalance", group = gIMB)
+showGI = input.bool(true, "Show Gap Imbalance", group = gIMB)
+
+maxKeepVI = input.int(
+     5,
+     "Max Volume Imbalances per timeframe",
+     minval = 1,
+     maxval = 100,
+     group = gIMB
+)
+
+maxKeepGI = input.int(
+     5,
+     "Max Gap Imbalances per timeframe",
+     minval = 1,
+     maxval = 100,
+     group = gIMB
+)
+
+cViBull = input.color(
+     color.new(#42a5f5, 80),
+     "Volume Imbalance bull / bear",
+     group = gIMB,
+     inline = "vi"
+)
+cViBear = input.color(
+     color.new(#ab47bc, 80),
+     "",
+     group = gIMB,
+     inline = "vi"
+)
+
+cGiBull = input.color(
+     color.new(#ffa726, 80),
+     "Gap Imbalance bull / bear",
+     group = gIMB,
+     inline = "gi"
+)
+cGiBear = input.color(
+     color.new(#78909c, 80),
+     "",
+     group = gIMB,
+     inline = "gi"
+)
 
 // ------------------------------ STYLE & KEEPS ------------------------
 gS            = "Style & Limits"
@@ -50,56 +111,82 @@ firstLastBear = input.bool(true, "Show first & last only (Bearish)", group = gS)
 showDebug     = input.bool(false, "Show debug info", group = gS, tooltip = "Enable to show a label on the last bar with array sizes and group keys.")
 
 obFirst = obOrigin == "First FVG candle"
-tf      = useChart ? timeframe.period : tfSel
-higher  = timeframe.in_seconds(tf) > timeframe.in_seconds()
-useTF   = useChart or higher          // custom TF must be strictly higher than the chart
 chartMs = timeframe.in_seconds() * 1000
-
-// Short, readable tag for the selected TF (e.g. 1M, WK, 1D, 4H, 15m).
-// Only shown when a non-chart timeframe is used.
-secTF  = timeframe.in_seconds(tf)
-tagTxt = secTF >= 2592000 ? str.tostring(int(math.round(secTF / 2592000.0))) + "M" : secTF >= 604800 ? "WK" : secTF >= 86400 ? str.tostring(int(math.round(secTF / 86400.0))) + "D" : secTF >= 3600 ? str.tostring(int(math.round(secTF / 3600.0))) + "H" : str.tostring(int(math.round(secTF / 60.0))) + "m"
-zoneTag = useChart ? "" : tagTxt
 
 // ------------------------------ STATE --------------------------------
 var array<box>  fB    = array.new<box>()
 var array<bool> fBull = array.new<bool>()
 var array<int>  fGrp  = array.new<int>()
+var array<int>  fSlot = array.new<int>()
 
 var array<box>  oB    = array.new<box>()
 var array<bool> oBull = array.new<bool>()
 var array<int>  oGrp  = array.new<int>()
+var array<int>  oSlot = array.new<int>()
+
+// Volume Imbalance state
+var array<box>  viB    = array.new<box>()
+var array<bool> viBull = array.new<bool>()
+var array<int>  viTime = array.new<int>()
+var array<int>  viSlot = array.new<int>()
+
+// Gap Imbalance state
+var array<box>  giB    = array.new<box>()
+var array<bool> giBull = array.new<bool>()
+var array<int>  giTime = array.new<int>()
+var array<int>  giSlot = array.new<int>()
 
 // ------------------------------ DETECTION ----------------------------
-detectFVG(float mSz, bool obF, int obL, bool obBdy) =>
+detectZones(float mSz, bool obF, int obL, bool obBdy) =>
     atr  = ta.atr(14)
-    bull = low > high[2] and (low - high[2]) > mSz * atr
-    bear = high < low[2] and (low[2] - high) > mSz * atr
-    float buT = bull ? low     : na    // bull top
-    float buB = bull ? high[2] : na    // bull bottom
-    int   buX = bull ? time[1] : na    // anchor = middle candle
-    float beT = bear ? low[2]  : na    // bear top
-    float beB = bear ? high    : na    // bear bottom
-    int   beX = bear ? time[1] : na
+    
+    // FVG detection
+    bullFVG = low > high[2] and (low - high[2]) > mSz * atr
+    bearFVG = high < low[2] and (low[2] - high) > mSz * atr
+    
+    float buT = bullFVG ? low     : na    // bull top
+    float buB = bullFVG ? high[2] : na    // bull bottom
+    int   buX = bullFVG ? time[1] : na    // anchor = middle candle
+    float beT = bearFVG ? low[2]  : na    // bear top
+    float beB = bearFVG ? high    : na    // bear bottom
+    int   beX = bearFVG ? time[1] : na
+    
     // ---- order block origin candle (bars back from current) ----
     int obIdx = na
-    if bull or bear
+    if bullFVG or bearFVG
         if obF
             obIdx := 2                    // first candle of the FVG triple
         else
-            // Fall back to the first FVG candle.
+            // Default OB origin: first FVG candle.
             obIdx := 2
 
-            // Check the most recent candle first, then move backwards.
             for distance = 1 to obL
                 candidateIdx = 2 + distance
 
+                firstHigh = high[2]
+                firstLow  = low[2]
+
+                candidateHigh = high[candidateIdx]
+                candidateLow  = low[candidateIdx]
+
+                // Candidate fully contains the first FVG candle.
                 candidateEngulfs =
-                     high[candidateIdx] >= high[2] and
-                     low[candidateIdx] <= low[2]
+                     candidateHigh >= firstHigh and
+                     candidateLow <= firstLow
+
+                // Candidate crosses only one side of the first FVG candle.
+                candidateBreaksRange =
+                     candidateHigh > firstHigh or
+                     candidateLow < firstLow
 
                 if candidateEngulfs
+                    // Nearest valid big candle found.
                     obIdx := candidateIdx
+                    break
+                else if candidateBreaksRange
+                    // The range was already broken before finding an engulfing
+                    // candle, so keep the first FVG candle as the OB.
+                    obIdx := 2
                     break
     float obT = na
     float obB = na
@@ -108,15 +195,67 @@ detectFVG(float mSz, bool obF, int obL, bool obBdy) =>
         obT := obBdy ? math.max(open[obIdx], close[obIdx]) : high[obIdx]
         obB := obBdy ? math.min(open[obIdx], close[obIdx]) : low[obIdx]
         obX := time[obIdx]
-    float obBuT = bull ? obT : na
-    float obBuB = bull ? obB : na
-    int   obBuX = bull ? obX : na
-    float obBeT = bear ? obT : na
-    float obBeB = bear ? obB : na
-    int   obBeX = bear ? obX : na
-    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX]
+    float obBuT = bullFVG ? obT : na
+    float obBuB = bullFVG ? obB : na
+    int   obBuX = bullFVG ? obX : na
+    float obBeT = bearFVG ? obT : na
+    float obBeB = bearFVG ? obB : na
+    int   obBeX = bearFVG ? obX : na
 
-[buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX] = request.security(syminfo.tickerid, tf, detectFVG(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+    // ---------------------------------------------------------
+    // Volume Imbalance:
+    // body-to-body gap, while the candle wicks still overlap.
+    // ---------------------------------------------------------
+    prevBodyTop = math.max(open[1], close[1])
+    prevBodyBot = math.min(open[1], close[1])
+
+    currBodyTop = math.max(open, close)
+    currBodyBot = math.min(open, close)
+
+    wicksOverlap =
+         low <= high[1] and
+         high >= low[1]
+
+    bullVI =
+         currBodyBot > prevBodyTop and
+         wicksOverlap
+
+    bearVI =
+         currBodyTop < prevBodyBot and
+         wicksOverlap
+
+    float bullViTop = bullVI ? currBodyBot : na
+    float bullViBot = bullVI ? prevBodyTop : na
+
+    float bearViTop = bearVI ? prevBodyBot : na
+    float bearViBot = bearVI ? currBodyTop : na
+
+    int bullViTime = bullVI ? time[1] : na
+    int bearViTime = bearVI ? time[1] : na
+
+    // ---------------------------------------------------------
+    // Gap Imbalance:
+    // complete wick-to-wick gap between consecutive candles.
+    // ---------------------------------------------------------
+    bullGI = low > high[1]
+    bearGI = high < low[1]
+
+    float bullGiTop = bullGI ? low : na
+    float bullGiBot = bullGI ? high[1] : na
+
+    float bearGiTop = bearGI ? low[1] : na
+    float bearGiBot = bearGI ? high : na
+
+    int bullGiTime = bullGI ? time[1] : na
+    int bearGiTime = bearGI ? time[1] : na
+
+    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX, bullViTop, bullViBot, bullViTime, bearViTop, bearViBot, bearViTime, bullGiTop, bullGiBot, bullGiTime, bearGiTop, bearGiBot, bearGiTime]
+
+[buT1, buB1, buX1, beT1, beB1, beX1, obBuT1, obBuB1, obBuX1, obBeT1, obBeB1, obBeX1, bullViTop1, bullViBot1, bullViTime1, bearViTop1, bearViBot1, bearViTime1, bullGiTop1, bullGiBot1, bullGiTime1, bearGiTop1, bearGiBot1, bearGiTime1] = request.security(syminfo.tickerid, tf1, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT2, buB2, buX2, beT2, beB2, beX2, obBuT2, obBuB2, obBuX2, obBeT2, obBeB2, obBeX2, bullViTop2, bullViBot2, bullViTime2, bearViTop2, bearViBot2, bearViTime2, bullGiTop2, bullGiBot2, bullGiTime2, bearGiTop2, bearGiBot2, bearGiTime2] = request.security(syminfo.tickerid, tf2, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT3, buB3, buX3, beT3, beB3, beX3, obBuT3, obBuB3, obBuX3, obBeT3, obBeB3, obBeX3, bullViTop3, bullViBot3, bullViTime3, bearViTop3, bearViBot3, bearViTime3, bullGiTop3, bullGiBot3, bullGiTime3, bearGiTop3, bearGiBot3, bearGiTime3] = request.security(syminfo.tickerid, tf3, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT4, buB4, buX4, beT4, beB4, beX4, obBuT4, obBuB4, obBuX4, obBeT4, obBeB4, obBeX4, bullViTop4, bullViBot4, bullViTime4, bearViTop4, bearViBot4, bearViTime4, bullGiTop4, bullGiBot4, bullGiTime4, bearGiTop4, bearGiBot4, bearGiTime4] = request.security(syminfo.tickerid, tf4, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT5, buB5, buX5, beT5, beB5, beX5, obBuT5, obBuB5, obBuX5, obBeT5, obBeB5, obBeX5, bullViTop5, bullViBot5, bullViTime5, bearViTop5, bearViBot5, bearViTime5, bullGiTop5, bullGiBot5, bullGiTime5, bearGiTop5, bearGiBot5, bearGiTime5] = request.security(syminfo.tickerid, tf5, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
 
 // ------------------------------ HELPERS ------------------------------
 rightT() => time + (extBars + 1) * chartMs
@@ -131,144 +270,521 @@ array_includes(array<int> arr, int val) =>
                 break
     found
 
-// Right-side TF label inside a box (only when a non-chart TF is used).
-setTag(box b, color c) =>
-    if zoneTag != ""
-        box.set_text(b, zoneTag + " ")
-        box.set_text_size(b, size.tiny)
+makeGroup(int anchorTime, int slot) =>
+    anchorTime + slot
+
+tfLabel(string tf) =>
+    sec = timeframe.in_seconds(tf)
+    sec >= 2592000 ? str.tostring(int(math.round(sec / 2592000.0))) + "M" :
+         sec >= 604800 ? str.tostring(int(math.round(sec / 604800.0))) + "W" :
+         sec >= 86400 ? str.tostring(int(math.round(sec / 86400.0))) + "D" :
+         sec >= 3600 ? str.tostring(int(math.round(sec / 3600.0))) + "H" :
+         str.tostring(int(math.round(sec / 60.0))) + "m"
+
+slotTF(int slot) =>
+    slot == 1 ? tf1 :
+     slot == 2 ? tf2 :
+     slot == 3 ? tf3 :
+     slot == 4 ? tf4 :
+     slot == 5 ? tf5 : ""
+
+setWatermark(box b, string txt, color textColor) =>
+    box.set_text(b, txt)
+    box.set_text_size(b, size.small)
+    box.set_text_formatting(b, text.format_bold)
+    box.set_text_color(b, color.new(textColor, 35))
+    box.set_text_halign(b, text.align_center)
+    box.set_text_valign(b, text.align_center)
+
+setGapWatermark(box b, string txt, color textColor) =>
+    box.set_text(b, txt)
+    box.set_text_size(b, size.tiny)
+    box.set_text_formatting(b, text.format_bold)
+    box.set_text_color(b, color.new(textColor, 25))
+    box.set_text_halign(b, text.align_right)
+    box.set_text_valign(b, text.align_top)
+
+showBox(
+     box b,
+     bool visible,
+     color bg,
+     color bcol,
+     string watermark
+) =>
+    box.set_bgcolor(b, visible ? bg : color(na))
+    box.set_border_color(
+         b,
+         visible and showBorder ? bcol : color(na)
+    )
+
+    box.set_text(b, visible ? watermark : "")
+
+    if visible
+        box.set_text_size(b, size.small)
         box.set_text_formatting(b, text.format_bold)
-        box.set_text_color(b, color.new(c, 0))
-        box.set_text_halign(b, text.align_right)
+        box.set_text_color(b, color.new(bcol, 35))
+        box.set_text_halign(b, text.align_center)
         box.set_text_valign(b, text.align_center)
 
-// Show or hide a box (used by 'Show first & last only'). Re-applies the
-// box's intended colours/tag when shown, transparent when hidden.
-showBox(box b, bool visible, color bg, color bcol) =>
-    box.set_bgcolor(b, visible ? bg : color(na))
-    box.set_border_color(b, visible and showBorder ? bcol : color(na))
-    box.set_text(b, visible and zoneTag != "" ? zoneTag + " " : "")
-    if visible and zoneTag != ""
-        box.set_text_color(b, color.new(bcol, 0))
+hasGapForSlot(
+     array<int> times,
+     array<int> slots,
+     int gapTime,
+     int slot
+) =>
+    bool found = false
 
-addBox(float top, float bot, int leftT, bool isBull, int grp) =>
+    if array.size(times) > 0
+        for i = 0 to array.size(times) - 1
+            if array.get(times, i) == gapTime and
+                 array.get(slots, i) == slot
+                found := true
+                break
+
+    found
+
+addFVG(
+     float top,
+     float bot,
+     int leftT,
+     bool isBull,
+     int grp,
+     int slot,
+     string tfText
+) =>
     bcol = isBull ? cBullB : cBearB
-    b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cBull : cBear)
-    setTag(b, bcol)
+
+    b = box.new(
+         leftT,
+         top,
+         rightT(),
+         bot,
+         xloc = xloc.bar_time,
+         border_width = showBorder ? 1 : 0,
+         border_color = showBorder ? bcol : color(na),
+         bgcolor = isBull ? cBull : cBear
+    )
+
+    setWatermark(b, tfText + " FVG", bcol)
+
     array.push(fB, b)
     array.push(fBull, isBull)
     array.push(fGrp, grp)
+    array.push(fSlot, slot)
 
-addOB(float top, float bot, int leftT, bool isBull, int grp) =>
+addOB(
+     float top,
+     float bot,
+     int leftT,
+     bool isBull,
+     int grp,
+     int slot,
+     string tfText
+) =>
     bcol = isBull ? cObBullB : cObBearB
-    b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cObBull : cObBear)
-    setTag(b, bcol)
+
+    b = box.new(
+         leftT,
+         top,
+         rightT(),
+         bot,
+         xloc = xloc.bar_time,
+         border_width = showBorder ? 1 : 0,
+         border_color = showBorder ? bcol : color(na),
+         bgcolor = isBull ? cObBull : cObBear
+    )
+
+    setWatermark(b, tfText + " OB", bcol)
+
     array.push(oB, b)
     array.push(oBull, isBull)
     array.push(oGrp, grp)
+    array.push(oSlot, slot)
 
-// ------------------------------ DRAW ---------------------------------
-if barstate.isconfirmed and useTF
-    if showBull and not na(buX) and (na(buX[1]) or buX != buX[1])
-        addBox(buT, buB, buX, true, buX)
-    if showBear and not na(beX) and (na(beX[1]) or beX != beX[1])
-        addBox(beT, beB, beX, false, beX)
-    // Create exactly one OB for each FVG group.
-    if showOB and not na(obBuX) and not na(buX) and not array_includes(oGrp, buX)
-        addOB(obBuT, obBuB, obBuX, true, buX)
-    if showOB and not na(obBeX) and not na(beX) and not array_includes(oGrp, beX)
-        addOB(obBeT, obBeB, obBeX, false, beX)
+addVI(
+     float top,
+     float bot,
+     int leftT,
+     bool isBull,
+     int slot,
+     string tfText
+) =>
+    bg = isBull ? cViBull : cViBear
 
-    // ---- Unified pruning by group key (per type) ----
-    uniqueGrpsBull = array.new<int>()
-    uniqueGrpsBear = array.new<int>()
-    
-    if array.size(fGrp) > 0
-        for idx = 0 to array.size(fGrp) - 1
-            g = array.get(fGrp, idx)
-            isBull = array.get(fBull, idx)
-            if isBull
-                if not array_includes(uniqueGrpsBull, g)
-                    array.push(uniqueGrpsBull, g)
-            else
-                if not array_includes(uniqueGrpsBear, g)
-                    array.push(uniqueGrpsBear, g)
-                    
-    if array.size(oGrp) > 0
-        for idx = 0 to array.size(oGrp) - 1
-            g = array.get(oGrp, idx)
-            isBull = array.get(oBull, idx)
-            if isBull
-                if not array_includes(uniqueGrpsBull, g)
-                    array.push(uniqueGrpsBull, g)
-            else
-                if not array_includes(uniqueGrpsBear, g)
-                    array.push(uniqueGrpsBear, g)
-    
-    // Sort unique group keys (ascending, oldest first)
-    array.sort(uniqueGrpsBull)
-    array.sort(uniqueGrpsBear)
-    
-    // Prune oldest bullish zones
-    if array.size(uniqueGrpsBull) > maxKeepBull
-        excess = array.size(uniqueGrpsBull) - maxKeepBull
-        for e = 0 to excess - 1
-            gToRemove = array.get(uniqueGrpsBull, e)
-            
-            // Delete and remove matching FVG boxes
-            if array.size(fGrp) > 0
-                idx = array.size(fGrp) - 1
-                while idx >= 0
-                    if array.get(fGrp, idx) == gToRemove
-                        box.delete(array.get(fB, idx))
-                        array.remove(fB, idx)
-                        array.remove(fBull, idx)
-                        array.remove(fGrp, idx)
-                    idx -= 1
-            
-            // Delete and remove matching OB boxes
-            if array.size(oGrp) > 0
-                idx = array.size(oGrp) - 1
-                while idx >= 0
-                    if array.get(oGrp, idx) == gToRemove
-                        box.delete(array.get(oB, idx))
-                        array.remove(oB, idx)
-                        array.remove(oBull, idx)
-                        array.remove(oGrp, idx)
-                    idx -= 1
+    b = box.new(
+         leftT,
+         top,
+         rightT(),
+         bot,
+         xloc = xloc.bar_time,
+         border_width = 0,
+         bgcolor = bg
+    )
 
-    // Prune oldest bearish zones
-    if array.size(uniqueGrpsBear) > maxKeepBear
-        excess = array.size(uniqueGrpsBear) - maxKeepBear
-        for e = 0 to excess - 1
-            gToRemove = array.get(uniqueGrpsBear, e)
-            
-            // Delete and remove matching FVG boxes
-            if array.size(fGrp) > 0
-                idx = array.size(fGrp) - 1
-                while idx >= 0
-                    if array.get(fGrp, idx) == gToRemove
-                        box.delete(array.get(fB, idx))
-                        array.remove(fB, idx)
-                        array.remove(fBull, idx)
-                        array.remove(fGrp, idx)
-                    idx -= 1
-            
-            // Delete and remove matching OB boxes
-            if array.size(oGrp) > 0
-                idx = array.size(oGrp) - 1
-                while idx >= 0
-                    if array.get(oGrp, idx) == gToRemove
-                        box.delete(array.get(oB, idx))
-                        array.remove(oB, idx)
-                        array.remove(oBull, idx)
-                        array.remove(oGrp, idx)
-                    idx -= 1
+    setGapWatermark(
+         b,
+         tfText + " VI",
+         color.new(bg, 0)
+    )
 
-// Warn when a custom TF isn't higher than the chart.
-if barstate.islast and not useChart and not higher
-    var label warn = na
-    label.delete(warn)
-    warn := label.new(bar_index, high, "FVG: selected TF must be higher than the chart", style = label.style_label_down, color = color.new(color.orange, 10), textcolor = color.white, size = size.small)
+    array.push(viB, b)
+    array.push(viBull, isBull)
+    array.push(viTime, leftT)
+    array.push(viSlot, slot)
+
+addGI(
+     float top,
+     float bot,
+     int leftT,
+     bool isBull,
+     int slot,
+     string tfText
+) =>
+    bg = isBull ? cGiBull : cGiBear
+
+    b = box.new(
+         leftT,
+         top,
+         rightT(),
+         bot,
+         xloc = xloc.bar_time,
+         border_width = 0,
+         bgcolor = bg
+    )
+
+    setGapWatermark(
+         b,
+         tfText + " GI",
+         color.new(bg, 0)
+    )
+
+    array.push(giB, b)
+    array.push(giBull, isBull)
+    array.push(giTime, leftT)
+    array.push(giSlot, slot)
+
+// ------------------------------ PROCESS TF ---------------------------
+processTF(
+     bool enabled,
+     int slot,
+     string tf,
+     float buTop,
+     float buBot,
+     int buAnchor,
+     float beTop,
+     float beBot,
+     int beAnchor,
+     float bullObTop,
+     float bullObBot,
+     int bullObTime,
+     float bearObTop,
+     float bearObBot,
+     int bearObTime,
+     float bullViTop,
+     float bullViBot,
+     int bullViTime,
+     float bearViTop,
+     float bearViBot,
+     int bearViTime,
+     float bullGiTop,
+     float bullGiBot,
+     int bullGiTime,
+     float bearGiTop,
+     float bearGiBot,
+     int bearGiTime
+) =>
+    label = tfLabel(tf)
+
+    bullGrp = not na(buAnchor) ? makeGroup(buAnchor, slot) : na
+    bearGrp = not na(beAnchor) ? makeGroup(beAnchor, slot) : na
+
+    if enabled
+        if showBull and not na(buAnchor) and not array_includes(fGrp, bullGrp)
+            addFVG(
+                 buTop,
+                 buBot,
+                 buAnchor,
+                 true,
+                 bullGrp,
+                 slot,
+                 label
+            )
+
+        if showBear and not na(beAnchor) and not array_includes(fGrp, bearGrp)
+            addFVG(
+                 beTop,
+                 beBot,
+                 beAnchor,
+                 false,
+                 bearGrp,
+                 slot,
+                 label
+            )
+
+        if showOB and showBull and not na(bullObTime) and
+             not na(bullGrp) and not array_includes(oGrp, bullGrp)
+            addOB(
+                 bullObTop,
+                 bullObBot,
+                 bullObTime,
+                 true,
+                 bullGrp,
+                 slot,
+                 label
+            )
+
+        if showOB and showBear and not na(bearObTime) and
+             not na(bearGrp) and not array_includes(oGrp, bearGrp)
+            addOB(
+                 bearObTop,
+                 bearObBot,
+                 bearObTime,
+                 false,
+                 bearGrp,
+                 slot,
+                 label
+            )
+
+        if showVI
+            if not na(bullViTime) and
+                 not hasGapForSlot(viTime, viSlot, bullViTime, slot)
+                addVI(
+                     bullViTop,
+                     bullViBot,
+                     bullViTime,
+                     true,
+                     slot,
+                     label
+                )
+
+            if not na(bearViTime) and
+                 not hasGapForSlot(viTime, viSlot, bearViTime, slot)
+                addVI(
+                     bearViTop,
+                     bearViBot,
+                     bearViTime,
+                     false,
+                     slot,
+                     label
+                )
+
+        if showGI
+            if not na(bullGiTime) and
+                 not hasGapForSlot(giTime, giSlot, bullGiTime, slot)
+                addGI(
+                     bullGiTop,
+                     bullGiBot,
+                     bullGiTime,
+                     true,
+                     slot,
+                     label
+                )
+
+            if not na(bearGiTime) and
+                 not hasGapForSlot(giTime, giSlot, bearGiTime, slot)
+                addGI(
+                     bearGiTop,
+                     bearGiBot,
+                     bearGiTime,
+                     false,
+                     slot,
+                     label
+                )
+
+// ------------------------------ EXECUTION ----------------------------
+if barstate.isconfirmed
+    processTF(
+         useTF1, 1, tf1,
+         buT1, buB1, buX1,
+         beT1, beB1, beX1,
+         obBuT1, obBuB1, obBuX1,
+         obBeT1, obBeB1, obBeX1,
+         bullViTop1, bullViBot1, bullViTime1,
+         bearViTop1, bearViBot1, bearViTime1,
+         bullGiTop1, bullGiBot1, bullGiTime1,
+         bearGiTop1, bearGiBot1, bearGiTime1
+    )
+
+    processTF(
+         useTF2, 2, tf2,
+         buT2, buB2, buX2,
+         beT2, beB2, beX2,
+         obBuT2, obBuB2, obBuX2,
+         obBeT2, obBeB2, obBeX2,
+         bullViTop2, bullViBot2, bullViTime2,
+         bearViTop2, bearViBot2, bearViTime2,
+         bullGiTop2, bullGiBot2, bullGiTime2,
+         bearGiTop2, bearGiBot2, bearGiTime2
+    )
+
+    processTF(
+         useTF3, 3, tf3,
+         buT3, buB3, buX3,
+         beT3, beB3, beX3,
+         obBuT3, obBuB3, obBuX3,
+         obBeT3, obBeB3, obBeX3,
+         bullViTop3, bullViBot3, bullViTime3,
+         bearViTop3, bearViBot3, bearViTime3,
+         bullGiTop3, bullGiBot3, bullGiTime3,
+         bearGiTop3, bearGiBot3, bearGiTime3
+    )
+
+    processTF(
+         useTF4, 4, tf4,
+         buT4, buB4, buX4,
+         beT4, beB4, beX4,
+         obBuT4, obBuB4, obBuX4,
+         obBeT4, obBeB4, obBeX4,
+         bullViTop4, bullViBot4, bullViTime4,
+         bearViTop4, bearViBot4, bearViTime4,
+         bullGiTop4, bullGiBot4, bullGiTime4,
+         bearGiTop4, bearGiBot4, bearGiTime4
+    )
+
+    processTF(
+         useTF5, 5, tf5,
+         buT5, buB5, buX5,
+         beT5, beB5, beX5,
+         obBuT5, obBuB5, obBuX5,
+         obBeT5, obBeB5, obBeX5,
+         bullViTop5, bullViBot5, bullViTime5,
+         bearViTop5, bearViBot5, bearViTime5,
+         bullGiTop5, bullGiBot5, bullGiTime5,
+         bearGiTop5, bearGiBot5, bearGiTime5
+    )
+
+    // ---- Unified pruning by group key (per timeframe slot and type) ----
+    for s = 1 to 5
+        uniqueGrpsBull = array.new<int>()
+        uniqueGrpsBear = array.new<int>()
+        
+        // Collect unique group keys for slot `s`
+        if array.size(fGrp) > 0
+            for idx = 0 to array.size(fGrp) - 1
+                g = array.get(fGrp, idx)
+                slot = array.get(fSlot, idx)
+                isBull = array.get(fBull, idx)
+                if slot == s
+                    if isBull
+                        if not array_includes(uniqueGrpsBull, g)
+                            array.push(uniqueGrpsBull, g)
+                    else
+                        if not array_includes(uniqueGrpsBear, g)
+                            array.push(uniqueGrpsBear, g)
+                            
+        if array.size(oGrp) > 0
+            for idx = 0 to array.size(oGrp) - 1
+                g = array.get(oGrp, idx)
+                slot = array.get(oSlot, idx)
+                isBull = array.get(oBull, idx)
+                if slot == s
+                    if isBull
+                        if not array_includes(uniqueGrpsBull, g)
+                            array.push(uniqueGrpsBull, g)
+                    else
+                        if not array_includes(uniqueGrpsBear, g)
+                            array.push(uniqueGrpsBear, g)
+        
+        array.sort(uniqueGrpsBull)
+        array.sort(uniqueGrpsBear)
+        
+        // Prune oldest bullish zones for slot `s`
+        if array.size(uniqueGrpsBull) > maxKeepBull
+            excess = array.size(uniqueGrpsBull) - maxKeepBull
+            for e = 0 to excess - 1
+                gToRemove = array.get(uniqueGrpsBull, e)
+                
+                // Delete and remove matching FVG boxes
+                if array.size(fGrp) > 0
+                    idx = array.size(fGrp) - 1
+                    while idx >= 0
+                        if array.get(fGrp, idx) == gToRemove and array.get(fSlot, idx) == s
+                            box.delete(array.get(fB, idx))
+                            array.remove(fB, idx)
+                            array.remove(fBull, idx)
+                            array.remove(fGrp, idx)
+                            array.remove(fSlot, idx)
+                        idx -= 1
+                
+                // Delete and remove matching OB boxes
+                if array.size(oGrp) > 0
+                    idx = array.size(oGrp) - 1
+                    while idx >= 0
+                        if array.get(oGrp, idx) == gToRemove and array.get(oSlot, idx) == s
+                            box.delete(array.get(oB, idx))
+                            array.remove(oB, idx)
+                            array.remove(oBull, idx)
+                            array.remove(oGrp, idx)
+                            array.remove(oSlot, idx)
+                        idx -= 1
+
+        // Prune oldest bearish zones for slot `s`
+        if array.size(uniqueGrpsBear) > maxKeepBear
+            excess = array.size(uniqueGrpsBear) - maxKeepBear
+            for e = 0 to excess - 1
+                gToRemove = array.get(uniqueGrpsBear, e)
+                
+                // Delete and remove matching FVG boxes
+                if array.size(fGrp) > 0
+                    idx = array.size(fGrp) - 1
+                    while idx >= 0
+                        if array.get(fGrp, idx) == gToRemove and array.get(fSlot, idx) == s
+                            box.delete(array.get(fB, idx))
+                            array.remove(fB, idx)
+                            array.remove(fBull, idx)
+                            array.remove(fGrp, idx)
+                            array.remove(fSlot, idx)
+                        idx -= 1
+                
+                // Delete and remove matching OB boxes
+                if array.size(oGrp) > 0
+                    idx = array.size(oGrp) - 1
+                    while idx >= 0
+                        if array.get(oGrp, idx) == gToRemove and array.get(oSlot, idx) == s
+                            box.delete(array.get(oB, idx))
+                            array.remove(oB, idx)
+                            array.remove(oBull, idx)
+                            array.remove(oGrp, idx)
+                            array.remove(oSlot, idx)
+                        idx -= 1
+
+        // ---- Pruning for Volume Imbalances (VI) ----
+        countVI = 0
+        if array.size(viSlot) > 0
+            for idx = 0 to array.size(viSlot) - 1
+                if array.get(viSlot, idx) == s
+                    countVI += 1
+        
+        if countVI > maxKeepVI
+            excessVI = countVI - maxKeepVI
+            for e = 1 to excessVI
+                for idx = 0 to array.size(viSlot) - 1
+                    if array.get(viSlot, idx) == s
+                        box.delete(array.get(viB, idx))
+                        array.remove(viB, idx)
+                        array.remove(viBull, idx)
+                        array.remove(viTime, idx)
+                        array.remove(viSlot, idx)
+                        break
+
+        // ---- Pruning for Gap Imbalances (GI) ----
+        countGI = 0
+        if array.size(giSlot) > 0
+            for idx = 0 to array.size(giSlot) - 1
+                if array.get(giSlot, idx) == s
+                    countGI += 1
+        
+        if countGI > maxKeepGI
+            excessGI = countGI - maxKeepGI
+            for e = 1 to excessGI
+                for idx = 0 to array.size(giSlot) - 1
+                    if array.get(giSlot, idx) == s
+                        box.delete(array.get(giB, idx))
+                        array.remove(giB, idx)
+                        array.remove(giBull, idx)
+                        array.remove(giTime, idx)
+                        array.remove(giSlot, idx)
+                        break
 
 // ----------------------- EXTEND --------------------------------------
 rT = rightT()
@@ -282,53 +798,105 @@ if array.size(oB) > 0
         bx = array.get(oB, i)
         box.set_right(bx, rT)
 
+if array.size(viB) > 0
+    for i = 0 to array.size(viB) - 1
+        bx = array.get(viB, i)
+        box.set_right(bx, rT)
+
+if array.size(giB) > 0
+    for i = 0 to array.size(giB) - 1
+        bx = array.get(giB, i)
+        box.set_right(bx, rT)
+
 // ----------------------- SHOW FIRST & LAST ONLY ---------------------
-// A zone = an FVG together with its OB (shared group key). Keep only the
-// oldest and newest group visible across both FVG and OB boxes for each type.
-int gMinBull = na
-int gMaxBull = na
-int gMinBear = na
-int gMaxBear = na
+// Reset and calculate min/max group keys per timeframe slot and type.
+var array<int> gMinBull = array.new<int>(6, na)
+var array<int> gMaxBull = array.new<int>(6, na)
+var array<int> gMinBear = array.new<int>(6, na)
+var array<int> gMaxBear = array.new<int>(6, na)
+
+array.fill(gMinBull, na)
+array.fill(gMaxBull, na)
+array.fill(gMinBear, na)
+array.fill(gMaxBear, na)
 
 if array.size(fGrp) > 0
     for idx = 0 to array.size(fGrp) - 1
         g = array.get(fGrp, idx)
+        slot = array.get(fSlot, idx)
         isBull = array.get(fBull, idx)
         if isBull
-            gMinBull := na(gMinBull) or g < gMinBull ? g : gMinBull
-            gMaxBull := na(gMaxBull) or g > gMaxBull ? g : gMaxBull
+            minVal = array.get(gMinBull, slot)
+            maxVal = array.get(gMaxBull, slot)
+            array.set(gMinBull, slot, na(minVal) or g < minVal ? g : minVal)
+            array.set(gMaxBull, slot, na(maxVal) or g > maxVal ? g : maxVal)
         else
-            gMinBear := na(gMinBear) or g < gMinBear ? g : gMinBear
-            gMaxBear := na(gMaxBear) or g > gMaxBear ? g : gMaxBear
+            minVal = array.get(gMinBear, slot)
+            maxVal = array.get(gMaxBear, slot)
+            array.set(gMinBear, slot, na(minVal) or g < minVal ? g : minVal)
+            array.set(gMaxBear, slot, na(maxVal) or g > maxVal ? g : maxVal)
 
 if array.size(oGrp) > 0
     for idx = 0 to array.size(oGrp) - 1
         g = array.get(oGrp, idx)
+        slot = array.get(oSlot, idx)
         isBull = array.get(oBull, idx)
         if isBull
-            gMinBull := na(gMinBull) or g < gMinBull ? g : gMinBull
-            gMaxBull := na(gMaxBull) or g > gMaxBull ? g : gMaxBull
+            minVal = array.get(gMinBull, slot)
+            maxVal = array.get(gMaxBull, slot)
+            array.set(gMinBull, slot, na(minVal) or g < minVal ? g : minVal)
+            array.set(gMaxBull, slot, na(maxVal) or g > maxVal ? g : maxVal)
         else
-            gMinBear := na(gMinBear) or g < gMinBear ? g : gMinBear
-            gMaxBear := na(gMaxBear) or g > gMaxBear ? g : gMaxBear
+            minVal = array.get(gMinBear, slot)
+            maxVal = array.get(gMaxBear, slot)
+            array.set(gMinBear, slot, na(minVal) or g < minVal ? g : minVal)
+            array.set(gMaxBear, slot, na(maxVal) or g > maxVal ? g : maxVal)
 
 if array.size(fB) > 0
     for idx = 0 to array.size(fB) - 1
         g    = array.get(fGrp, idx)
+        slot = array.get(fSlot, idx)
         bull = array.get(fBull, idx)
         bg   = bull ? cBull : cBear
         bcol = bull ? cBullB : cBearB
-        visible = bull ? (not firstLastBull or (g == gMinBull or g == gMaxBull)) : (not firstLastBear or (g == gMinBear or g == gMaxBear))
-        showBox(array.get(fB, idx), visible, bg, bcol)
+        
+        minVal = bull ? array.get(gMinBull, slot) : array.get(gMinBear, slot)
+        maxVal = bull ? array.get(gMaxBull, slot) : array.get(gMaxBear, slot)
+        firstLast = bull ? firstLastBull : firstLastBear
+        
+        visible = not firstLast or (g == minVal or g == maxVal)
+        tfText = tfLabel(slotTF(slot))
+        
+        showBox(
+             array.get(fB, idx),
+             visible,
+             bg,
+             bcol,
+             tfText + " FVG"
+        )
 
 if array.size(oB) > 0
     for idx = 0 to array.size(oB) - 1
         g    = array.get(oGrp, idx)
+        slot = array.get(oSlot, idx)
         bull = array.get(oBull, idx)
         bg   = bull ? cObBull : cObBear
         bcol = bull ? cObBullB : cObBearB
-        visible = bull ? (not firstLastBull or (g == gMinBull or g == gMaxBull)) : (not firstLastBear or (g == gMinBear or g == gMaxBear))
-        showBox(array.get(oB, idx), visible, bg, bcol)
+        
+        minVal = bull ? array.get(gMinBull, slot) : array.get(gMinBear, slot)
+        maxVal = bull ? array.get(gMaxBull, slot) : array.get(gMaxBear, slot)
+        firstLast = bull ? firstLastBull : firstLastBear
+        
+        visible = not firstLast or (g == minVal or g == maxVal)
+        tfText = tfLabel(slotTF(slot))
+        
+        showBox(
+             array.get(oB, idx),
+             visible,
+             bg,
+             bcol,
+             tfText + " OB"
+        )
 
 if showDebug and barstate.islast
     var string fTops = ""
@@ -340,7 +908,11 @@ if showDebug and barstate.islast
     dbg := label.new(bar_index, close, 
        "fGrp size: " + str.tostring(array.size(fGrp)) + 
        "\noGrp size: " + str.tostring(array.size(oB)) + 
+       "\nviB size: " + str.tostring(array.size(viB)) +
+       "\ngiB size: " + str.tostring(array.size(giB)) +
        "\nfGrp: " + str.tostring(fGrp) + 
        "\noGrp: " + str.tostring(oGrp) +
+       "\nfSlot: " + str.tostring(fSlot) +
+       "\noSlot: " + str.tostring(oSlot) +
        "\nfBearTops: " + fTops,
        color = color.blue, textcolor = color.white, size = size.large)
