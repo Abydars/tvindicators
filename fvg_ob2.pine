@@ -54,15 +54,16 @@ maxKeepVI = input.int(
      5,
      "Max Volume Imbalances per timeframe",
      minval = 1,
-     maxval = 100,
-     group = gIMB
+     maxval = 15,
+     group = gIMB,
+     tooltip = "Capped so the combined box count across all zone types and timeframes stays within the 500-box pool (max_boxes_count)."
 )
 
 maxKeepGI = input.int(
      5,
      "Max Gap Imbalances per timeframe",
      minval = 1,
-     maxval = 100,
+     maxval = 15,
      group = gIMB
 )
 
@@ -104,14 +105,22 @@ cObBullB      = input.color(color.rgb(46, 125, 50), "", group = gS, inline = "ob
 cObBearB      = input.color(color.rgb(142, 0, 0), "", group = gS, inline = "ob")
 showBorder    = input.bool(false, "Show border", group = gS)
 extBars       = input.int(10, "Extend right (bars)", minval = 0, group = gS)
-maxKeepBull   = input.int(5, "Max bullish zones kept", minval = 1, maxval = 500, group = gS)
-maxKeepBear   = input.int(5, "Max bearish zones kept", minval = 1, maxval = 500, group = gS)
+maxKeepBull   = input.int(5, "Max bullish zones kept", minval = 1, maxval = 15, group = gS, tooltip = "Per timeframe. Each kept zone draws up to 2 boxes (FVG + OB). Capped so the combined box count across all zone types and timeframes stays within the 500-box pool (max_boxes_count).")
+maxKeepBear   = input.int(5, "Max bearish zones kept", minval = 1, maxval = 15, group = gS)
 firstLastBull = input.bool(true, "Show first & last only (Bullish)", group = gS)
 firstLastBear = input.bool(true, "Show first & last only (Bearish)", group = gS)
 showDebug     = input.bool(false, "Show debug info", group = gS, tooltip = "Enable to show a label on the last bar with array sizes and group keys.")
 
 obFirst = obOrigin == "First FVG candle"
 chartMs = timeframe.in_seconds() * 1000
+
+// Right-extension measured in each zone's OWN timeframe bars (not chart bars),
+// so "Extend right (bars)" looks consistent across timeframes.
+extMs1 = timeframe.in_seconds(tf1) * 1000
+extMs2 = timeframe.in_seconds(tf2) * 1000
+extMs3 = timeframe.in_seconds(tf3) * 1000
+extMs4 = timeframe.in_seconds(tf4) * 1000
+extMs5 = timeframe.in_seconds(tf5) * 1000
 
 // ------------------------------ STATE --------------------------------
 var array<box>  fB    = array.new<box>()
@@ -251,14 +260,20 @@ detectZones(float mSz, bool obF, int obL, bool obBdy) =>
 
     [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX, bullViTop, bullViBot, bullViTime, bearViTop, bearViBot, bearViTime, bullGiTop, bullGiBot, bullGiTime, bearGiTop, bearGiBot, bearGiTime]
 
-[buT1, buB1, buX1, beT1, beB1, beX1, obBuT1, obBuB1, obBuX1, obBeT1, obBeB1, obBeX1, bullViTop1, bullViBot1, bullViTime1, bearViTop1, bearViBot1, bearViTime1, bullGiTop1, bullGiBot1, bullGiTime1, bearGiTop1, bearGiBot1, bearGiTime1] = request.security(syminfo.tickerid, tf1, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT2, buB2, buX2, beT2, beB2, beX2, obBuT2, obBuB2, obBuX2, obBeT2, obBeB2, obBeX2, bullViTop2, bullViBot2, bullViTime2, bearViTop2, bearViBot2, bearViTime2, bullGiTop2, bullGiBot2, bullGiTime2, bearGiTop2, bearGiBot2, bearGiTime2] = request.security(syminfo.tickerid, tf2, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT3, buB3, buX3, beT3, beB3, beX3, obBuT3, obBuB3, obBuX3, obBeT3, obBeB3, obBeX3, bullViTop3, bullViBot3, bullViTime3, bearViTop3, bearViBot3, bearViTime3, bullGiTop3, bullGiBot3, bullGiTime3, bearGiTop3, bearGiBot3, bearGiTime3] = request.security(syminfo.tickerid, tf3, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT4, buB4, buX4, beT4, beB4, beX4, obBuT4, obBuB4, obBuX4, obBeT4, obBeB4, obBeX4, bullViTop4, bullViBot4, bullViTime4, bearViTop4, bearViBot4, bearViTime4, bullGiTop4, bullGiBot4, bullGiTime4, bearGiTop4, bearGiBot4, bearGiTime4] = request.security(syminfo.tickerid, tf4, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT5, buB5, buX5, beT5, beB5, beX5, obBuT5, obBuB5, obBuX5, obBeT5, obBeB5, obBeX5, bullViTop5, bullViBot5, bullViTime5, bearViTop5, bearViBot5, bearViTime5, bullGiTop5, bullGiBot5, bullGiTime5, bearGiTop5, bearGiBot5, bearGiTime5] = request.security(syminfo.tickerid, tf5, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT1, buB1, buX1, beT1, beB1, beX1, obBuT1, obBuB1, obBuX1, obBeT1, obBeB1, obBeX1, bullViTop1, bullViBot1, bullViTime1, bearViTop1, bearViBot1, bearViTime1, bullGiTop1, bullGiBot1, bullGiTime1, bearGiTop1, bearGiBot1, bearGiTime1] = request.security(syminfo.tickerid, useTF1 ? tf1 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT2, buB2, buX2, beT2, beB2, beX2, obBuT2, obBuB2, obBuX2, obBeT2, obBeB2, obBeX2, bullViTop2, bullViBot2, bullViTime2, bearViTop2, bearViBot2, bearViTime2, bullGiTop2, bullGiBot2, bullGiTime2, bearGiTop2, bearGiBot2, bearGiTime2] = request.security(syminfo.tickerid, useTF2 ? tf2 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT3, buB3, buX3, beT3, beB3, beX3, obBuT3, obBuB3, obBuX3, obBeT3, obBeB3, obBeX3, bullViTop3, bullViBot3, bullViTime3, bearViTop3, bearViBot3, bearViTime3, bullGiTop3, bullGiBot3, bullGiTime3, bearGiTop3, bearGiBot3, bearGiTime3] = request.security(syminfo.tickerid, useTF3 ? tf3 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT4, buB4, buX4, beT4, beB4, beX4, obBuT4, obBuB4, obBuX4, obBeT4, obBeB4, obBeX4, bullViTop4, bullViBot4, bullViTime4, bearViTop4, bearViBot4, bearViTime4, bullGiTop4, bullGiBot4, bullGiTime4, bearGiTop4, bearGiBot4, bearGiTime4] = request.security(syminfo.tickerid, useTF4 ? tf4 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT5, buB5, buX5, beT5, beB5, beX5, obBuT5, obBuB5, obBuX5, obBeT5, obBeB5, obBeX5, bullViTop5, bullViBot5, bullViTime5, bearViTop5, bearViBot5, bearViTime5, bullGiTop5, bullGiBot5, bullGiTime5, bearGiTop5, bearGiBot5, bearGiTime5] = request.security(syminfo.tickerid, useTF5 ? tf5 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
 
 // ------------------------------ HELPERS ------------------------------
-rightT() => time + (extBars + 1) * chartMs
+rightTForSlot(int slot) =>
+    ms = slot == 1 ? extMs1 :
+         slot == 2 ? extMs2 :
+         slot == 3 ? extMs3 :
+         slot == 4 ? extMs4 :
+         slot == 5 ? extMs5 : chartMs
+    time + (extBars + 1) * ms
 
 // Helper to check if an array includes a value
 array_includes(array<int> arr, int val) =>
@@ -357,7 +372,7 @@ addFVG(
     b = box.new(
          leftT,
          top,
-         rightT(),
+         rightTForSlot(slot),
          bot,
          xloc = xloc.bar_time,
          border_width = showBorder ? 1 : 0,
@@ -386,7 +401,7 @@ addOB(
     b = box.new(
          leftT,
          top,
-         rightT(),
+         rightTForSlot(slot),
          bot,
          xloc = xloc.bar_time,
          border_width = showBorder ? 1 : 0,
@@ -414,7 +429,7 @@ addVI(
     b = box.new(
          leftT,
          top,
-         rightT(),
+         rightTForSlot(slot),
          bot,
          xloc = xloc.bar_time,
          border_width = 0,
@@ -445,7 +460,7 @@ addGI(
     b = box.new(
          leftT,
          top,
-         rightT(),
+         rightTForSlot(slot),
          bot,
          xloc = xloc.bar_time,
          border_width = 0,
@@ -787,26 +802,25 @@ if barstate.isconfirmed
                         break
 
 // ----------------------- EXTEND --------------------------------------
-rT = rightT()
 if array.size(fB) > 0
     for i = 0 to array.size(fB) - 1
         bx = array.get(fB, i)
-        box.set_right(bx, rT)
+        box.set_right(bx, rightTForSlot(array.get(fSlot, i)))
 
 if array.size(oB) > 0
     for i = 0 to array.size(oB) - 1
         bx = array.get(oB, i)
-        box.set_right(bx, rT)
+        box.set_right(bx, rightTForSlot(array.get(oSlot, i)))
 
 if array.size(viB) > 0
     for i = 0 to array.size(viB) - 1
         bx = array.get(viB, i)
-        box.set_right(bx, rT)
+        box.set_right(bx, rightTForSlot(array.get(viSlot, i)))
 
 if array.size(giB) > 0
     for i = 0 to array.size(giB) - 1
         bx = array.get(giB, i)
-        box.set_right(bx, rT)
+        box.set_right(bx, rightTForSlot(array.get(giSlot, i)))
 
 // ----------------------- SHOW FIRST & LAST ONLY ---------------------
 // Reset and calculate min/max group keys per timeframe slot and type.
@@ -899,7 +913,7 @@ if array.size(oB) > 0
         )
 
 if showDebug and barstate.islast
-    var string fTops = ""
+    string fTops = ""
     if array.size(fB) > 0
         for i = 0 to array.size(fB) - 1
             fTops := fTops + (array.get(fBull, i) ? "" : str.tostring(array.get(fGrp, i)) + ":" + str.tostring(box.get_top(array.get(fB, i))) + " ")
