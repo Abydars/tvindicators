@@ -11,6 +11,10 @@ indicator("FVG + OB v2 (multi TF)", "FVG OB v2", overlay = true, max_boxes_count
 //
 //  Zones are kept permanently, regardless of whether they are partially
 //  or fully filled.
+//
+//  FVG and OB are detected on each enabled timeframe (via request.security).
+//  Volume / Gap Imbalances are detected on the CHART timeframe only, so the
+//  higher-timeframe security calls stay lightweight.
 // =====================================================================
 
 // ------------------------------ TIMEFRAMES ---------------------------
@@ -24,12 +28,6 @@ tf2    = input.timeframe("60",  "Timeframe 2", group = gTF, inline = "tf2")
 
 useTF3 = input.bool(true,  "Enable", group = gTF, inline = "tf3")
 tf3    = input.timeframe("240", "Timeframe 3", group = gTF, inline = "tf3")
-
-useTF4 = input.bool(false, "Enable", group = gTF, inline = "tf4")
-tf4    = input.timeframe("D",   "Timeframe 4", group = gTF, inline = "tf4")
-
-useTF5 = input.bool(false, "Enable", group = gTF, inline = "tf5")
-tf5    = input.timeframe("W",   "Timeframe 5", group = gTF, inline = "tf5")
 
 // ------------------------------ FVG ----------------------------------
 gT           = "FVG"
@@ -45,14 +43,15 @@ obLookback = input.int(7, "Big-candle lookback", minval = 1, maxval = 50, group 
 obBody     = input.bool(false, "Body only (ignore wicks)", group = gOB)
 
 // ---------------------- ADDITIONAL IMBALANCES ------------------------
-gIMB = "Additional Imbalances"
+// Volume / Gap Imbalances are detected on the chart timeframe only.
+gIMB = "Additional Imbalances (chart TF)"
 
 showVI = input.bool(true, "Show Volume Imbalance", group = gIMB)
 showGI = input.bool(true, "Show Gap Imbalance", group = gIMB)
 
 maxKeepVI = input.int(
      5,
-     "Max Volume Imbalances per timeframe",
+     "Max Volume Imbalances kept",
      minval = 1,
      maxval = 15,
      group = gIMB,
@@ -61,7 +60,7 @@ maxKeepVI = input.int(
 
 maxKeepGI = input.int(
      5,
-     "Max Gap Imbalances per timeframe",
+     "Max Gap Imbalances kept",
      minval = 1,
      maxval = 15,
      group = gIMB
@@ -119,8 +118,6 @@ chartMs = timeframe.in_seconds() * 1000
 extMs1 = timeframe.in_seconds(tf1) * 1000
 extMs2 = timeframe.in_seconds(tf2) * 1000
 extMs3 = timeframe.in_seconds(tf3) * 1000
-extMs4 = timeframe.in_seconds(tf4) * 1000
-extMs5 = timeframe.in_seconds(tf5) * 1000
 
 // ------------------------------ STATE --------------------------------
 var array<box>  fB    = array.new<box>()
@@ -211,68 +208,17 @@ detectZones(float mSz, bool obF, int obL, bool obBdy) =>
     float obBeB = bearFVG ? obB : na
     int   obBeX = bearFVG ? obX : na
 
-    // ---------------------------------------------------------
-    // Volume Imbalance:
-    // body-to-body gap, while the candle wicks still overlap.
-    // ---------------------------------------------------------
-    prevBodyTop = math.max(open[1], close[1])
-    prevBodyBot = math.min(open[1], close[1])
+    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX]
 
-    currBodyTop = math.max(open, close)
-    currBodyBot = math.min(open, close)
-
-    wicksOverlap =
-         low <= high[1] and
-         high >= low[1]
-
-    bullVI =
-         currBodyBot > prevBodyTop and
-         wicksOverlap
-
-    bearVI =
-         currBodyTop < prevBodyBot and
-         wicksOverlap
-
-    float bullViTop = bullVI ? currBodyBot : na
-    float bullViBot = bullVI ? prevBodyTop : na
-
-    float bearViTop = bearVI ? prevBodyBot : na
-    float bearViBot = bearVI ? currBodyTop : na
-
-    int bullViTime = bullVI ? time[1] : na
-    int bearViTime = bearVI ? time[1] : na
-
-    // ---------------------------------------------------------
-    // Gap Imbalance:
-    // complete wick-to-wick gap between consecutive candles.
-    // ---------------------------------------------------------
-    bullGI = low > high[1]
-    bearGI = high < low[1]
-
-    float bullGiTop = bullGI ? low : na
-    float bullGiBot = bullGI ? high[1] : na
-
-    float bearGiTop = bearGI ? low[1] : na
-    float bearGiBot = bearGI ? high : na
-
-    int bullGiTime = bullGI ? time[1] : na
-    int bearGiTime = bearGI ? time[1] : na
-
-    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX, bullViTop, bullViBot, bullViTime, bearViTop, bearViBot, bearViTime, bullGiTop, bullGiBot, bullGiTime, bearGiTop, bearGiBot, bearGiTime]
-
-[buT1, buB1, buX1, beT1, beB1, beX1, obBuT1, obBuB1, obBuX1, obBeT1, obBeB1, obBeX1, bullViTop1, bullViBot1, bullViTime1, bearViTop1, bearViBot1, bearViTime1, bullGiTop1, bullGiBot1, bullGiTime1, bearGiTop1, bearGiBot1, bearGiTime1] = request.security(syminfo.tickerid, useTF1 ? tf1 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT2, buB2, buX2, beT2, beB2, beX2, obBuT2, obBuB2, obBuX2, obBeT2, obBeB2, obBeX2, bullViTop2, bullViBot2, bullViTime2, bearViTop2, bearViBot2, bearViTime2, bullGiTop2, bullGiBot2, bullGiTime2, bearGiTop2, bearGiBot2, bearGiTime2] = request.security(syminfo.tickerid, useTF2 ? tf2 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT3, buB3, buX3, beT3, beB3, beX3, obBuT3, obBuB3, obBuX3, obBeT3, obBeB3, obBeX3, bullViTop3, bullViBot3, bullViTime3, bearViTop3, bearViBot3, bearViTime3, bullGiTop3, bullGiBot3, bullGiTime3, bearGiTop3, bearGiBot3, bearGiTime3] = request.security(syminfo.tickerid, useTF3 ? tf3 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT4, buB4, buX4, beT4, beB4, beX4, obBuT4, obBuB4, obBuX4, obBeT4, obBeB4, obBeX4, bullViTop4, bullViBot4, bullViTime4, bearViTop4, bearViBot4, bearViTime4, bullGiTop4, bullGiBot4, bullGiTime4, bearGiTop4, bearGiBot4, bearGiTime4] = request.security(syminfo.tickerid, useTF4 ? tf4 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
-[buT5, buB5, buX5, beT5, beB5, beX5, obBuT5, obBuB5, obBuX5, obBeT5, obBeB5, obBeX5, bullViTop5, bullViBot5, bullViTime5, bearViTop5, bearViBot5, bearViTime5, bullGiTop5, bullGiBot5, bullGiTime5, bearGiTop5, bearGiBot5, bearGiTime5] = request.security(syminfo.tickerid, useTF5 ? tf5 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT1, buB1, buX1, beT1, beB1, beX1, obBuT1, obBuB1, obBuX1, obBeT1, obBeB1, obBeX1] = request.security(syminfo.tickerid, useTF1 ? tf1 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT2, buB2, buX2, beT2, beB2, beX2, obBuT2, obBuB2, obBuX2, obBeT2, obBeB2, obBeX2] = request.security(syminfo.tickerid, useTF2 ? tf2 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+[buT3, buB3, buX3, beT3, beB3, beX3, obBuT3, obBuB3, obBuX3, obBeT3, obBeB3, obBeX3] = request.security(syminfo.tickerid, useTF3 ? tf3 : timeframe.period, detectZones(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
 
 // ------------------------------ HELPERS ------------------------------
 rightTForSlot(int slot) =>
     ms = slot == 1 ? extMs1 :
          slot == 2 ? extMs2 :
-         slot == 3 ? extMs3 :
-         slot == 4 ? extMs4 :
-         slot == 5 ? extMs5 : chartMs
+         slot == 3 ? extMs3 : chartMs
     time + (extBars + 1) * ms
 
 // Helper to check if an array includes a value
@@ -299,9 +245,7 @@ tfLabel(string tf) =>
 slotTF(int slot) =>
     slot == 1 ? tf1 :
      slot == 2 ? tf2 :
-     slot == 3 ? tf3 :
-     slot == 4 ? tf4 :
-     slot == 5 ? tf5 : ""
+     slot == 3 ? tf3 : ""
 
 setWatermark(box b, string txt, color textColor) =>
     box.set_text(b, txt)
@@ -494,19 +438,7 @@ processTF(
      int bullObTime,
      float bearObTop,
      float bearObBot,
-     int bearObTime,
-     float bullViTop,
-     float bullViBot,
-     int bullViTime,
-     float bearViTop,
-     float bearViBot,
-     int bearViTime,
-     float bullGiTop,
-     float bullGiBot,
-     int bullGiTime,
-     float bearGiTop,
-     float bearGiBot,
-     int bearGiTime
+     int bearObTime
 ) =>
     label = tfLabel(tf)
 
@@ -560,52 +492,6 @@ processTF(
                  label
             )
 
-        if showVI
-            if not na(bullViTime) and
-                 not hasGapForSlot(viTime, viSlot, bullViTime, slot)
-                addVI(
-                     bullViTop,
-                     bullViBot,
-                     bullViTime,
-                     true,
-                     slot,
-                     label
-                )
-
-            if not na(bearViTime) and
-                 not hasGapForSlot(viTime, viSlot, bearViTime, slot)
-                addVI(
-                     bearViTop,
-                     bearViBot,
-                     bearViTime,
-                     false,
-                     slot,
-                     label
-                )
-
-        if showGI
-            if not na(bullGiTime) and
-                 not hasGapForSlot(giTime, giSlot, bullGiTime, slot)
-                addGI(
-                     bullGiTop,
-                     bullGiBot,
-                     bullGiTime,
-                     true,
-                     slot,
-                     label
-                )
-
-            if not na(bearGiTime) and
-                 not hasGapForSlot(giTime, giSlot, bearGiTime, slot)
-                addGI(
-                     bearGiTop,
-                     bearGiBot,
-                     bearGiTime,
-                     false,
-                     slot,
-                     label
-                )
-
 // ------------------------------ EXECUTION ----------------------------
 if barstate.isconfirmed
     processTF(
@@ -613,11 +499,7 @@ if barstate.isconfirmed
          buT1, buB1, buX1,
          beT1, beB1, beX1,
          obBuT1, obBuB1, obBuX1,
-         obBeT1, obBeB1, obBeX1,
-         bullViTop1, bullViBot1, bullViTime1,
-         bearViTop1, bearViBot1, bearViTime1,
-         bullGiTop1, bullGiBot1, bullGiTime1,
-         bearGiTop1, bearGiBot1, bearGiTime1
+         obBeT1, obBeB1, obBeX1
     )
 
     processTF(
@@ -625,11 +507,7 @@ if barstate.isconfirmed
          buT2, buB2, buX2,
          beT2, beB2, beX2,
          obBuT2, obBuB2, obBuX2,
-         obBeT2, obBeB2, obBeX2,
-         bullViTop2, bullViBot2, bullViTime2,
-         bearViTop2, bearViBot2, bearViTime2,
-         bullGiTop2, bullGiBot2, bullGiTime2,
-         bearGiTop2, bearGiBot2, bearGiTime2
+         obBeT2, obBeB2, obBeX2
     )
 
     processTF(
@@ -637,39 +515,38 @@ if barstate.isconfirmed
          buT3, buB3, buX3,
          beT3, beB3, beX3,
          obBuT3, obBuB3, obBuX3,
-         obBeT3, obBeB3, obBeX3,
-         bullViTop3, bullViBot3, bullViTime3,
-         bearViTop3, bearViBot3, bearViTime3,
-         bullGiTop3, bullGiBot3, bullGiTime3,
-         bearGiTop3, bearGiBot3, bearGiTime3
+         obBeT3, obBeB3, obBeX3
     )
 
-    processTF(
-         useTF4, 4, tf4,
-         buT4, buB4, buX4,
-         beT4, beB4, beX4,
-         obBuT4, obBuB4, obBuX4,
-         obBeT4, obBeB4, obBeX4,
-         bullViTop4, bullViBot4, bullViTime4,
-         bearViTop4, bearViBot4, bearViTime4,
-         bullGiTop4, bullGiBot4, bullGiTime4,
-         bearGiTop4, bearGiBot4, bearGiTime4
-    )
+    // ---- Volume / Gap Imbalances on the CHART timeframe (no security) ----
+    // Slot 0 marks chart-timeframe gaps; rightTForSlot(0) extends by chart bars.
+    chartLabel = tfLabel(timeframe.period)
 
-    processTF(
-         useTF5, 5, tf5,
-         buT5, buB5, buX5,
-         beT5, beB5, beX5,
-         obBuT5, obBuB5, obBuX5,
-         obBeT5, obBeB5, obBeX5,
-         bullViTop5, bullViBot5, bullViTime5,
-         bearViTop5, bearViBot5, bearViTime5,
-         bullGiTop5, bullGiBot5, bullGiTime5,
-         bearGiTop5, bearGiBot5, bearGiTime5
-    )
+    if showVI
+        prevBodyTop = math.max(open[1], close[1])
+        prevBodyBot = math.min(open[1], close[1])
+        currBodyTop = math.max(open, close)
+        currBodyBot = math.min(open, close)
+        wicksOverlap = low <= high[1] and high >= low[1]
+        bullVI = currBodyBot > prevBodyTop and wicksOverlap
+        bearVI = currBodyTop < prevBodyBot and wicksOverlap
+
+        if bullVI and not hasGapForSlot(viTime, viSlot, time[1], 0)
+            addVI(currBodyBot, prevBodyTop, time[1], true, 0, chartLabel)
+        if bearVI and not hasGapForSlot(viTime, viSlot, time[1], 0)
+            addVI(prevBodyBot, currBodyTop, time[1], false, 0, chartLabel)
+
+    if showGI
+        bullGI = low > high[1]
+        bearGI = high < low[1]
+
+        if bullGI and not hasGapForSlot(giTime, giSlot, time[1], 0)
+            addGI(low, high[1], time[1], true, 0, chartLabel)
+        if bearGI and not hasGapForSlot(giTime, giSlot, time[1], 0)
+            addGI(low[1], high, time[1], false, 0, chartLabel)
 
     // ---- Unified pruning by group key (per timeframe slot and type) ----
-    for s = 1 to 5
+    for s = 1 to 3
         uniqueGrpsBull = array.new<int>()
         uniqueGrpsBear = array.new<int>()
         
@@ -763,43 +640,20 @@ if barstate.isconfirmed
                             array.remove(oSlot, idx)
                         idx -= 1
 
-        // ---- Pruning for Volume Imbalances (VI) ----
-        countVI = 0
-        if array.size(viSlot) > 0
-            for idx = 0 to array.size(viSlot) - 1
-                if array.get(viSlot, idx) == s
-                    countVI += 1
-        
-        if countVI > maxKeepVI
-            excessVI = countVI - maxKeepVI
-            for e = 1 to excessVI
-                for idx = 0 to array.size(viSlot) - 1
-                    if array.get(viSlot, idx) == s
-                        box.delete(array.get(viB, idx))
-                        array.remove(viB, idx)
-                        array.remove(viBull, idx)
-                        array.remove(viTime, idx)
-                        array.remove(viSlot, idx)
-                        break
+    // ---- Pruning for chart Volume / Gap Imbalances (oldest first) ----
+    while array.size(viB) > maxKeepVI
+        box.delete(array.get(viB, 0))
+        array.remove(viB, 0)
+        array.remove(viBull, 0)
+        array.remove(viTime, 0)
+        array.remove(viSlot, 0)
 
-        // ---- Pruning for Gap Imbalances (GI) ----
-        countGI = 0
-        if array.size(giSlot) > 0
-            for idx = 0 to array.size(giSlot) - 1
-                if array.get(giSlot, idx) == s
-                    countGI += 1
-        
-        if countGI > maxKeepGI
-            excessGI = countGI - maxKeepGI
-            for e = 1 to excessGI
-                for idx = 0 to array.size(giSlot) - 1
-                    if array.get(giSlot, idx) == s
-                        box.delete(array.get(giB, idx))
-                        array.remove(giB, idx)
-                        array.remove(giBull, idx)
-                        array.remove(giTime, idx)
-                        array.remove(giSlot, idx)
-                        break
+    while array.size(giB) > maxKeepGI
+        box.delete(array.get(giB, 0))
+        array.remove(giB, 0)
+        array.remove(giBull, 0)
+        array.remove(giTime, 0)
+        array.remove(giSlot, 0)
 
 // ----------------------- EXTEND --------------------------------------
 if array.size(fB) > 0
@@ -824,10 +678,10 @@ if array.size(giB) > 0
 
 // ----------------------- SHOW FIRST & LAST ONLY ---------------------
 // Reset and calculate min/max group keys per timeframe slot and type.
-var array<int> gMinBull = array.new<int>(6, na)
-var array<int> gMaxBull = array.new<int>(6, na)
-var array<int> gMinBear = array.new<int>(6, na)
-var array<int> gMaxBear = array.new<int>(6, na)
+var array<int> gMinBull = array.new<int>(4, na)
+var array<int> gMaxBull = array.new<int>(4, na)
+var array<int> gMinBear = array.new<int>(4, na)
+var array<int> gMaxBear = array.new<int>(4, na)
 
 array.fill(gMinBull, na)
 array.fill(gMaxBull, na)
