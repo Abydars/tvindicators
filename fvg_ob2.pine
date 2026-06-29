@@ -1,0 +1,346 @@
+//@version=6
+indicator("FVG + OB v2 (single TF)", "FVG OB v2", overlay = true, max_boxes_count = 500)
+
+// =====================================================================
+//  Fair Value Gaps + Order Blocks, on ONE timeframe of your choice.
+//    FVG - 3-candle fair value gap (candle 1's wick doesn't overlap
+//          candle 3's wick, leaving an imbalance around candle 2).
+//    OB  - order block tied to each FVG; the origin candle is either the
+//          first candle of the FVG triple, or a big candle just before it
+//          that engulfs that first candle.
+//
+//  Zones are kept permanently, regardless of whether they are partially
+//  or fully filled.
+// =====================================================================
+
+// ------------------------------ TIMEFRAME ----------------------------
+gTF      = "Timeframe"
+useChart = input.bool(true, "Use chart timeframe", group = gTF)
+tfSel    = input.timeframe("240", "Higher timeframe", group = gTF, tooltip = "Used only when 'Use chart timeframe' is off. Must be HIGHER than the chart timeframe; it is projected onto the chart by time. A TF equal to or lower than the chart is ignored (nothing new is drawn).")
+
+// ------------------------------ FVG ----------------------------------
+gT           = "FVG"
+showBull     = input.bool(true,  "Show bullish FVG", group = gT)
+showBear     = input.bool(true,  "Show bearish FVG", group = gT)
+minSize      = input.float(0.0, "Min gap size (× ATR)", minval = 0, step = 0.05, group = gT, tooltip = "Hide gaps smaller than this multiple of ATR(14) on the selected timeframe. 0 = show all.")
+
+// ------------------------------ ORDER BLOCKS -------------------------
+gOB        = "Order Blocks"
+showOB     = input.bool(true, "Show order blocks", group = gOB)
+obOrigin   = input.string("Nearest qualifying big candle within the lookback", "OB origin candle", options = ["First FVG candle", "Nearest qualifying big candle within the lookback"], group = gOB, tooltip = "Which candle becomes the order block for each FVG. 'First FVG candle' = the first (oldest) candle of the 3-candle FVG. 'Nearest qualifying big candle within the lookback' = the nearest candle within the lookback before that first candle whose range engulfs the first candle's high and low.")
+obLookback = input.int(7, "Big-candle lookback", minval = 1, maxval = 50, group = gOB, tooltip = "Only for 'Nearest qualifying big candle within the lookback'. How many candles before the first FVG candle to search for an engulfing big candle.")
+obBody     = input.bool(false, "Body only (ignore wicks)", group = gOB)
+
+// ------------------------------ STYLE & KEEPS ------------------------
+gS            = "Style & Limits"
+cBull         = input.color(color.new(#26a69a, 80), "Bullish FVG fill / border", group = gS, inline = "bu")
+cBullB        = input.color(color.rgb(38, 166, 154), "", group = gS, inline = "bu")
+cBear         = input.color(color.new(#ef5350, 80), "Bearish FVG fill / border", group = gS, inline = "be")
+cBearB        = input.color(color.rgb(239, 83, 80), "", group = gS, inline = "be")
+cObBull       = input.color(color.new(#2e7d32, 80), "OB bull / bear", group = gS, inline = "ob")
+cObBear       = input.color(color.new(#8e0000, 80), "", group = gS, inline = "ob")
+cObBullB      = input.color(color.rgb(46, 125, 50), "", group = gS, inline = "ob")
+cObBearB      = input.color(color.rgb(142, 0, 0), "", group = gS, inline = "ob")
+showBorder    = input.bool(false, "Show border", group = gS)
+extBars       = input.int(10, "Extend right (bars)", minval = 0, group = gS)
+maxKeepBull   = input.int(5, "Max bullish zones kept", minval = 1, maxval = 500, group = gS)
+maxKeepBear   = input.int(5, "Max bearish zones kept", minval = 1, maxval = 500, group = gS)
+firstLastBull = input.bool(true, "Show first & last only (Bullish)", group = gS)
+firstLastBear = input.bool(true, "Show first & last only (Bearish)", group = gS)
+showDebug     = input.bool(false, "Show debug info", group = gS, tooltip = "Enable to show a label on the last bar with array sizes and group keys.")
+
+obFirst = obOrigin == "First FVG candle"
+tf      = useChart ? timeframe.period : tfSel
+higher  = timeframe.in_seconds(tf) > timeframe.in_seconds()
+useTF   = useChart or higher          // custom TF must be strictly higher than the chart
+chartMs = timeframe.in_seconds() * 1000
+
+// Short, readable tag for the selected TF (e.g. 1M, WK, 1D, 4H, 15m).
+// Only shown when a non-chart timeframe is used.
+secTF  = timeframe.in_seconds(tf)
+tagTxt = secTF >= 2592000 ? str.tostring(int(math.round(secTF / 2592000.0))) + "M" : secTF >= 604800 ? "WK" : secTF >= 86400 ? str.tostring(int(math.round(secTF / 86400.0))) + "D" : secTF >= 3600 ? str.tostring(int(math.round(secTF / 3600.0))) + "H" : str.tostring(int(math.round(secTF / 60.0))) + "m"
+zoneTag = useChart ? "" : tagTxt
+
+// ------------------------------ STATE --------------------------------
+var array<box>  fB    = array.new<box>()
+var array<bool> fBull = array.new<bool>()
+var array<int>  fGrp  = array.new<int>()
+
+var array<box>  oB    = array.new<box>()
+var array<bool> oBull = array.new<bool>()
+var array<int>  oGrp  = array.new<int>()
+
+// ------------------------------ DETECTION ----------------------------
+detectFVG(float mSz, bool obF, int obL, bool obBdy) =>
+    atr  = ta.atr(14)
+    bull = low > high[2] and (low - high[2]) > mSz * atr
+    bear = high < low[2] and (low[2] - high) > mSz * atr
+    float buT = bull ? low     : na    // bull top
+    float buB = bull ? high[2] : na    // bull bottom
+    int   buX = bull ? time[1] : na    // anchor = middle candle
+    float beT = bear ? low[2]  : na    // bear top
+    float beB = bear ? high    : na    // bear bottom
+    int   beX = bear ? time[1] : na
+    // ---- order block origin candle (bars back from current) ----
+    int obIdx = na
+    if bull or bear
+        if obF
+            obIdx := 2                    // first candle of the FVG triple
+        else
+            // Fall back to the first FVG candle.
+            obIdx := 2
+
+            // Check the most recent candle first, then move backwards.
+            for distance = 1 to obL
+                candidateIdx = 2 + distance
+
+                candidateEngulfs =
+                     high[candidateIdx] >= high[2] and
+                     low[candidateIdx] <= low[2]
+
+                if candidateEngulfs
+                    obIdx := candidateIdx
+                    break
+    float obT = na
+    float obB = na
+    int   obX = na
+    if not na(obIdx)
+        obT := obBdy ? math.max(open[obIdx], close[obIdx]) : high[obIdx]
+        obB := obBdy ? math.min(open[obIdx], close[obIdx]) : low[obIdx]
+        obX := time[obIdx]
+    float obBuT = bull ? obT : na
+    float obBuB = bull ? obB : na
+    int   obBuX = bull ? obX : na
+    float obBeT = bear ? obT : na
+    float obBeB = bear ? obB : na
+    int   obBeX = bear ? obX : na
+    [buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX]
+
+[buT, buB, buX, beT, beB, beX, obBuT, obBuB, obBuX, obBeT, obBeB, obBeX] = request.security(syminfo.tickerid, tf, detectFVG(minSize, obFirst, obLookback, obBody), lookahead = barmerge.lookahead_off)
+
+// ------------------------------ HELPERS ------------------------------
+rightT() => time + (extBars + 1) * chartMs
+
+// Helper to check if an array includes a value
+array_includes(array<int> arr, int val) =>
+    bool found = false
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            if array.get(arr, i) == val
+                found := true
+                break
+    found
+
+// Right-side TF label inside a box (only when a non-chart TF is used).
+setTag(box b, color c) =>
+    if zoneTag != ""
+        box.set_text(b, zoneTag + " ")
+        box.set_text_size(b, size.tiny)
+        box.set_text_formatting(b, text.format_bold)
+        box.set_text_color(b, color.new(c, 0))
+        box.set_text_halign(b, text.align_right)
+        box.set_text_valign(b, text.align_center)
+
+// Show or hide a box (used by 'Show first & last only'). Re-applies the
+// box's intended colours/tag when shown, transparent when hidden.
+showBox(box b, bool visible, color bg, color bcol) =>
+    box.set_bgcolor(b, visible ? bg : color(na))
+    box.set_border_color(b, visible and showBorder ? bcol : color(na))
+    box.set_text(b, visible and zoneTag != "" ? zoneTag + " " : "")
+    if visible and zoneTag != ""
+        box.set_text_color(b, color.new(bcol, 0))
+
+addBox(float top, float bot, int leftT, bool isBull, int grp) =>
+    bcol = isBull ? cBullB : cBearB
+    b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cBull : cBear)
+    setTag(b, bcol)
+    array.push(fB, b)
+    array.push(fBull, isBull)
+    array.push(fGrp, grp)
+
+addOB(float top, float bot, int leftT, bool isBull, int grp) =>
+    bcol = isBull ? cObBullB : cObBearB
+    b = box.new(leftT, top, rightT(), bot, xloc = xloc.bar_time, border_width = showBorder ? 1 : 0, border_color = showBorder ? bcol : color(na), bgcolor = isBull ? cObBull : cObBear)
+    setTag(b, bcol)
+    array.push(oB, b)
+    array.push(oBull, isBull)
+    array.push(oGrp, grp)
+
+// ------------------------------ DRAW ---------------------------------
+if barstate.isconfirmed and useTF
+    if showBull and not na(buX) and (na(buX[1]) or buX != buX[1])
+        addBox(buT, buB, buX, true, buX)
+    if showBear and not na(beX) and (na(beX[1]) or beX != beX[1])
+        addBox(beT, beB, beX, false, beX)
+    // Create exactly one OB for each FVG group.
+    if showOB and not na(obBuX) and not na(buX) and not array_includes(oGrp, buX)
+        addOB(obBuT, obBuB, obBuX, true, buX)
+    if showOB and not na(obBeX) and not na(beX) and not array_includes(oGrp, beX)
+        addOB(obBeT, obBeB, obBeX, false, beX)
+
+    // ---- Unified pruning by group key (per type) ----
+    uniqueGrpsBull = array.new<int>()
+    uniqueGrpsBear = array.new<int>()
+    
+    if array.size(fGrp) > 0
+        for idx = 0 to array.size(fGrp) - 1
+            g = array.get(fGrp, idx)
+            isBull = array.get(fBull, idx)
+            if isBull
+                if not array_includes(uniqueGrpsBull, g)
+                    array.push(uniqueGrpsBull, g)
+            else
+                if not array_includes(uniqueGrpsBear, g)
+                    array.push(uniqueGrpsBear, g)
+                    
+    if array.size(oGrp) > 0
+        for idx = 0 to array.size(oGrp) - 1
+            g = array.get(oGrp, idx)
+            isBull = array.get(oBull, idx)
+            if isBull
+                if not array_includes(uniqueGrpsBull, g)
+                    array.push(uniqueGrpsBull, g)
+            else
+                if not array_includes(uniqueGrpsBear, g)
+                    array.push(uniqueGrpsBear, g)
+    
+    // Sort unique group keys (ascending, oldest first)
+    array.sort(uniqueGrpsBull)
+    array.sort(uniqueGrpsBear)
+    
+    // Prune oldest bullish zones
+    if array.size(uniqueGrpsBull) > maxKeepBull
+        excess = array.size(uniqueGrpsBull) - maxKeepBull
+        for e = 0 to excess - 1
+            gToRemove = array.get(uniqueGrpsBull, e)
+            
+            // Delete and remove matching FVG boxes
+            if array.size(fGrp) > 0
+                idx = array.size(fGrp) - 1
+                while idx >= 0
+                    if array.get(fGrp, idx) == gToRemove
+                        box.delete(array.get(fB, idx))
+                        array.remove(fB, idx)
+                        array.remove(fBull, idx)
+                        array.remove(fGrp, idx)
+                    idx -= 1
+            
+            // Delete and remove matching OB boxes
+            if array.size(oGrp) > 0
+                idx = array.size(oGrp) - 1
+                while idx >= 0
+                    if array.get(oGrp, idx) == gToRemove
+                        box.delete(array.get(oB, idx))
+                        array.remove(oB, idx)
+                        array.remove(oBull, idx)
+                        array.remove(oGrp, idx)
+                    idx -= 1
+
+    // Prune oldest bearish zones
+    if array.size(uniqueGrpsBear) > maxKeepBear
+        excess = array.size(uniqueGrpsBear) - maxKeepBear
+        for e = 0 to excess - 1
+            gToRemove = array.get(uniqueGrpsBear, e)
+            
+            // Delete and remove matching FVG boxes
+            if array.size(fGrp) > 0
+                idx = array.size(fGrp) - 1
+                while idx >= 0
+                    if array.get(fGrp, idx) == gToRemove
+                        box.delete(array.get(fB, idx))
+                        array.remove(fB, idx)
+                        array.remove(fBull, idx)
+                        array.remove(fGrp, idx)
+                    idx -= 1
+            
+            // Delete and remove matching OB boxes
+            if array.size(oGrp) > 0
+                idx = array.size(oGrp) - 1
+                while idx >= 0
+                    if array.get(oGrp, idx) == gToRemove
+                        box.delete(array.get(oB, idx))
+                        array.remove(oB, idx)
+                        array.remove(oBull, idx)
+                        array.remove(oGrp, idx)
+                    idx -= 1
+
+// Warn when a custom TF isn't higher than the chart.
+if barstate.islast and not useChart and not higher
+    var label warn = na
+    label.delete(warn)
+    warn := label.new(bar_index, high, "FVG: selected TF must be higher than the chart", style = label.style_label_down, color = color.new(color.orange, 10), textcolor = color.white, size = size.small)
+
+// ----------------------- EXTEND --------------------------------------
+rT = rightT()
+if array.size(fB) > 0
+    for i = 0 to array.size(fB) - 1
+        bx = array.get(fB, i)
+        box.set_right(bx, rT)
+
+if array.size(oB) > 0
+    for i = 0 to array.size(oB) - 1
+        bx = array.get(oB, i)
+        box.set_right(bx, rT)
+
+// ----------------------- SHOW FIRST & LAST ONLY ---------------------
+// A zone = an FVG together with its OB (shared group key). Keep only the
+// oldest and newest group visible across both FVG and OB boxes for each type.
+int gMinBull = na
+int gMaxBull = na
+int gMinBear = na
+int gMaxBear = na
+
+if array.size(fGrp) > 0
+    for idx = 0 to array.size(fGrp) - 1
+        g = array.get(fGrp, idx)
+        isBull = array.get(fBull, idx)
+        if isBull
+            gMinBull := na(gMinBull) or g < gMinBull ? g : gMinBull
+            gMaxBull := na(gMaxBull) or g > gMaxBull ? g : gMaxBull
+        else
+            gMinBear := na(gMinBear) or g < gMinBear ? g : gMinBear
+            gMaxBear := na(gMaxBear) or g > gMaxBear ? g : gMaxBear
+
+if array.size(oGrp) > 0
+    for idx = 0 to array.size(oGrp) - 1
+        g = array.get(oGrp, idx)
+        isBull = array.get(oBull, idx)
+        if isBull
+            gMinBull := na(gMinBull) or g < gMinBull ? g : gMinBull
+            gMaxBull := na(gMaxBull) or g > gMaxBull ? g : gMaxBull
+        else
+            gMinBear := na(gMinBear) or g < gMinBear ? g : gMinBear
+            gMaxBear := na(gMaxBear) or g > gMaxBear ? g : gMaxBear
+
+if array.size(fB) > 0
+    for idx = 0 to array.size(fB) - 1
+        g    = array.get(fGrp, idx)
+        bull = array.get(fBull, idx)
+        bg   = bull ? cBull : cBear
+        bcol = bull ? cBullB : cBearB
+        visible = bull ? (not firstLastBull or (g == gMinBull or g == gMaxBull)) : (not firstLastBear or (g == gMinBear or g == gMaxBear))
+        showBox(array.get(fB, idx), visible, bg, bcol)
+
+if array.size(oB) > 0
+    for idx = 0 to array.size(oB) - 1
+        g    = array.get(oGrp, idx)
+        bull = array.get(oBull, idx)
+        bg   = bull ? cObBull : cObBear
+        bcol = bull ? cObBullB : cObBearB
+        visible = bull ? (not firstLastBull or (g == gMinBull or g == gMaxBull)) : (not firstLastBear or (g == gMinBear or g == gMaxBear))
+        showBox(array.get(oB, idx), visible, bg, bcol)
+
+if showDebug and barstate.islast
+    var string fTops = ""
+    if array.size(fB) > 0
+        for i = 0 to array.size(fB) - 1
+            fTops := fTops + (array.get(fBull, i) ? "" : str.tostring(array.get(fGrp, i)) + ":" + str.tostring(box.get_top(array.get(fB, i))) + " ")
+    var label dbg = na
+    label.delete(dbg)
+    dbg := label.new(bar_index, close, 
+       "fGrp size: " + str.tostring(array.size(fGrp)) + 
+       "\noGrp size: " + str.tostring(array.size(oB)) + 
+       "\nfGrp: " + str.tostring(fGrp) + 
+       "\noGrp: " + str.tostring(oGrp) +
+       "\nfBearTops: " + fTops,
+       color = color.blue, textcolor = color.white, size = size.large)
