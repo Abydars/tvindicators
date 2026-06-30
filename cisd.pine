@@ -13,7 +13,7 @@
 //  - Remove invalidated OBs.
 //  - Remove OBs that are too old.
 //  - Remove OBs that are too far from current price.
-//  - Keep only lowest and highest relevant OB per direction.
+//  - Keep only the two OBs nearest to current price per direction.
 //
 //  CISD:
 //  - Starts from the first candle of the delivery run.
@@ -210,8 +210,9 @@ f_ob(int sl, int sb, bool useBody) =>
         int idx = -1
 
         for i = 1 to sb
-            if idx == -1 and close[i] < open[i]
+            if close[i] < open[i]
                 idx := i
+                break
 
         if idx >= 0
             bullZoneTop := useBody
@@ -232,8 +233,9 @@ f_ob(int sl, int sb, bool useBody) =>
         int idx = -1
 
         for i = 1 to sb
-            if idx == -1 and close[i] > open[i]
+            if close[i] > open[i]
                 idx := i
+                break
 
         if idx >= 0
             bearZoneTop := useBody
@@ -246,8 +248,13 @@ f_ob(int sl, int sb, bool useBody) =>
 
             bearZoneTime := time[idx]
 
-        [bullZoneTop, bullZoneBottom, bullZoneTime, bearZoneTop, bearZoneBottom, bearZoneTime]
+    // Return at function level so OB data is emitted on every bar, not only
+    // on bars where a bearish BOS fires.
+    [bullZoneTop, bullZoneBottom, bullZoneTime, bearZoneTop, bearZoneBottom, bearZoneTime]
 
+// Note: the OB timeframe should be greater than or equal to the chart
+// timeframe. Selecting an OB timeframe lower than the chart degrades the
+// HTF pivot / BOS detection done inside f_ob().
 string htf = obTF == "" ? timeframe.period : obTF
 
 [bullTop, bullBot, bullLeft, bearTop, bearBot, bearLeft] = request.security(
@@ -274,8 +281,6 @@ type OB
     bool bull = false
     bool tapped = false
     bool done = false
-
-    float extreme = na
 
     float anchor = na
     int anchorBar = na
@@ -350,48 +355,28 @@ f_removeIrrelevantOBs(array<OB> objects) =>
 
         index -= 1
 
-// Keep only the lowest and highest OB by price midpoint.
+// Keep only the two OBs nearest to current price (the most actionable ones).
 f_keepPriceExtremes(array<OB> objects) =>
     while array.size(objects) > 2
         int objectCount = array.size(objects)
 
-        int lowestIndex = 0
-        int highestIndex = 0
-
         OB firstOB = array.get(objects, 0)
 
-        float lowestPrice = firstOB.midpoint
-        float highestPrice = firstOB.midpoint
+        int farthestIndex = 0
+        float farthestDistance = math.abs(firstOB.midpoint - close)
 
         for i = 1 to objectCount - 1
             OB currentOB = array.get(objects, i)
+            float currentDistance = math.abs(currentOB.midpoint - close)
 
-            if currentOB.midpoint < lowestPrice
-                lowestPrice := currentOB.midpoint
-                lowestIndex := i
+            if currentDistance > farthestDistance
+                farthestDistance := currentDistance
+                farthestIndex := i
 
-            if currentOB.midpoint > highestPrice
-                highestPrice := currentOB.midpoint
-                highestIndex := i
-
-        int removeIndex = -1
-
-        // Remove an OB located between the lowest and highest.
-        for i = 0 to objectCount - 1
-            if removeIndex == -1 and
-               i != lowestIndex and
-               i != highestIndex
-
-                removeIndex := i
-
-        // Handles duplicate/equal price levels.
-        if removeIndex == -1
-            removeIndex := 0
-
-        OB removedOB = array.get(objects, removeIndex)
+        OB removedOB = array.get(objects, farthestIndex)
 
         f_deleteOB(removedOB)
-        array.remove(objects, removeIndex)
+        array.remove(objects, farthestIndex)
 
 // ============================================================================
 // NEW ORDER BLOCKS
@@ -507,7 +492,7 @@ int bi = array.size(bulls) - 1
 while bi >= 0
     OB o = array.get(bulls, bi)
 
-    if not na(o.zone)
+    if not na(o.zone) and not o.done
         box.set_right(o.zone, time)
 
     bool removed = false
@@ -524,7 +509,7 @@ while bi >= 0
         else
             o.done := true
 
-    if not removed
+    if not removed and barstate.isconfirmed
         bool tappedNow =
              not o.tapped and
              high >= o.bottom and
@@ -532,20 +517,15 @@ while bi >= 0
 
         if tappedNow
             o.tapped := true
-            o.extreme := low
 
             if isDn
                 o.anchor := open
                 o.anchorBar := bar_index
 
         if o.tapped and not o.done
-            o.extreme :=
-                 na(o.extreme)
-                     ? low
-                     : math.min(o.extreme, low)
-
             bool confirmed =
                  not na(o.anchor) and
+                 o.anchorBar != bar_index and
                  (
                      confirmBody
                          ? close > o.anchor
@@ -603,6 +583,10 @@ while bi >= 0
                         o.absorbed += o.pendCnt
                         o.pend := false
                         o.pendCnt := 0
+                        o.cBTop := na
+                        o.cBBot := na
+                        o.cRTop := na
+                        o.cRBot := na
 
                     else
                         o.anchor := open
@@ -651,7 +635,7 @@ int ri = array.size(bears) - 1
 while ri >= 0
     OB o = array.get(bears, ri)
 
-    if not na(o.zone)
+    if not na(o.zone) and not o.done
         box.set_right(o.zone, time)
 
     bool removed = false
@@ -668,7 +652,7 @@ while ri >= 0
         else
             o.done := true
 
-    if not removed
+    if not removed and barstate.isconfirmed
         bool tappedNow =
              not o.tapped and
              high >= o.bottom and
@@ -676,20 +660,15 @@ while ri >= 0
 
         if tappedNow
             o.tapped := true
-            o.extreme := high
 
             if isUp
                 o.anchor := open
                 o.anchorBar := bar_index
 
         if o.tapped and not o.done
-            o.extreme :=
-                 na(o.extreme)
-                     ? high
-                     : math.max(o.extreme, high)
-
             bool confirmed =
                  not na(o.anchor) and
+                 o.anchorBar != bar_index and
                  (
                      confirmBody
                          ? close < o.anchor
@@ -747,6 +726,10 @@ while ri >= 0
                         o.absorbed += o.pendCnt
                         o.pend := false
                         o.pendCnt := 0
+                        o.cBTop := na
+                        o.cBBot := na
+                        o.cRTop := na
+                        o.cRBot := na
 
                     else
                         o.anchor := open
