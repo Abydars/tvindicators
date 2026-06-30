@@ -1,0 +1,815 @@
+//@version=6
+// ============================================================================
+//  OB + CISD [SMC] v3
+//
+//  Flow:
+//  HTF OB forms
+//  -> price taps the OB
+//  -> reaction low/high forms
+//  -> consecutive opposing candles define CISD
+//  -> price confirms through CISD
+//
+//  OB filtering:
+//  - Remove invalidated OBs.
+//  - Remove OBs that are too old.
+//  - Remove OBs that are too far from current price.
+//  - Keep only lowest and highest relevant OB per direction.
+//
+//  CISD:
+//  - Starts from the first candle of the delivery run.
+//  - Ends at the CISD confirmation candle.
+// ============================================================================
+
+indicator(
+     "OB + CISD [SMC]",
+     "OB+CISD",
+     overlay = true,
+     max_boxes_count = 100,
+     max_lines_count = 100,
+     max_labels_count = 100
+)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+gOB = "Order Blocks"
+
+showOB = input.bool(
+     true,
+     "Show order blocks",
+     group = gOB
+)
+
+obTF = input.timeframe(
+     "60",
+     "OB timeframe",
+     group = gOB,
+     tooltip = "Use 60 for 1H order blocks while running the indicator on a 5m chart."
+)
+
+swingLen = input.int(
+     5,
+     "Swing length (pivots)",
+     minval = 1,
+     group = gOB
+)
+
+obSearchBack = input.int(
+     20,
+     "OB candle search-back",
+     minval = 1,
+     maxval = 100,
+     group = gOB
+)
+
+obUseBody = input.bool(
+     false,
+     "OB zone uses body only",
+     group = gOB,
+     tooltip = "Enabled: open-to-close. Disabled: full high-to-low candle range."
+)
+
+removeInvalid = input.bool(
+     true,
+     "Remove OB on invalidation",
+     group = gOB,
+     tooltip = "Bullish OB invalidates below its bottom. Bearish OB invalidates above its top."
+)
+
+obMaxAge = input.int(
+     200,
+     "Maximum OB age in HTF candles",
+     minval = 1,
+     maxval = 5000,
+     group = gOB,
+     tooltip = "Older order blocks are removed. With 1H selected, 200 means approximately 200 hours."
+)
+
+obMaxDistanceATR = input.float(
+     10.0,
+     "Maximum distance from price (ATR)",
+     minval = 0.5,
+     maxval = 100.0,
+     step = 0.5,
+     group = gOB,
+     tooltip = "Removes order blocks whose midpoint is farther than this ATR multiple from current price."
+)
+
+distanceATRLength = input.int(
+     14,
+     "Distance ATR length",
+     minval = 1,
+     maxval = 200,
+     group = gOB
+)
+
+bullOBcol = input.color(
+     color.new(#1d9e75, 82),
+     "Bullish OB",
+     group = gOB,
+     inline = "ob"
+)
+
+bearOBcol = input.color(
+     color.new(#e24b4a, 82),
+     "Bearish OB",
+     group = gOB,
+     inline = "ob"
+)
+
+// ----------------------------------------------------------------------------
+
+gC = "CISD after OB tap"
+
+showCISD = input.bool(
+     true,
+     "Show CISD",
+     group = gC
+)
+
+engulfMode = input.string(
+     "Body",
+     "Counter-candle contain mode",
+     options = ["Body", "Range"],
+     group = gC,
+     tooltip = "Determines how a later dominant candle must contain the opposite candle."
+)
+
+maxAbsorb = input.int(
+     0,
+     "Max absorbed counter-candles",
+     minval = 0,
+     maxval = 20,
+     group = gC,
+     tooltip = "0 means strict consecutive candle colours."
+)
+
+confirmBody = input.bool(
+     true,
+     "Confirm on body close",
+     group = gC,
+     tooltip = "Enabled: candle must close through CISD. Disabled: wick through CISD confirms."
+)
+
+showCISDlbl = input.bool(
+     true,
+     "Show CISD labels",
+     group = gC
+)
+
+bullCISDcol = input.color(
+     #185fa5,
+     "Bullish CISD",
+     group = gC,
+     inline = "cc"
+)
+
+bearCISDcol = input.color(
+     #993556,
+     "Bearish CISD",
+     group = gC,
+     inline = "cc"
+)
+
+// ============================================================================
+// ORDER-BLOCK DETECTION
+// ============================================================================
+
+f_ob(int sl, int sb, bool useBody) =>
+    float ph = ta.pivothigh(sl, sl)
+    float pl = ta.pivotlow(sl, sl)
+
+    var float swH = na
+    var float swL = na
+
+    var bool bUp = false
+    var bool bDn = false
+
+    var float bullZoneTop = na
+    var float bullZoneBottom = na
+    var int bullZoneTime = na
+
+    var float bearZoneTop = na
+    var float bearZoneBottom = na
+    var int bearZoneTime = na
+
+    if not na(ph)
+        swH := ph
+        bDn := false
+
+    if not na(pl)
+        swL := pl
+        bUp := false
+
+    // Bullish BOS:
+    // nearest bearish candle before bullish structure break.
+    if not na(swH) and close > swH and not bUp
+        bUp := true
+
+        int idx = -1
+
+        for i = 1 to sb
+            if idx == -1 and close[i] < open[i]
+                idx := i
+
+        if idx >= 0
+            bullZoneTop := useBody
+                 ? math.max(open[idx], close[idx])
+                 : high[idx]
+
+            bullZoneBottom := useBody
+                 ? math.min(open[idx], close[idx])
+                 : low[idx]
+
+            bullZoneTime := time[idx]
+
+    // Bearish BOS:
+    // nearest bullish candle before bearish structure break.
+    if not na(swL) and close < swL and not bDn
+        bDn := true
+
+        int idx = -1
+
+        for i = 1 to sb
+            if idx == -1 and close[i] > open[i]
+                idx := i
+
+        if idx >= 0
+            bearZoneTop := useBody
+                 ? math.max(open[idx], close[idx])
+                 : high[idx]
+
+            bearZoneBottom := useBody
+                 ? math.min(open[idx], close[idx])
+                 : low[idx]
+
+            bearZoneTime := time[idx]
+
+        [bullZoneTop, bullZoneBottom, bullZoneTime, bearZoneTop, bearZoneBottom, bearZoneTime]
+
+string htf = obTF == "" ? timeframe.period : obTF
+
+[bullTop, bullBot, bullLeft, bearTop, bearBot, bearLeft] = request.security(
+     syminfo.tickerid,
+     htf,
+     f_ob(swingLen, obSearchBack, obUseBody),
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off
+)
+
+// ============================================================================
+// PER-OB STATE
+// ============================================================================
+
+type OB
+    box zone = na
+
+    float top = na
+    float bottom = na
+    float midpoint = na
+
+    int createdTime = na
+
+    bool bull = false
+    bool tapped = false
+    bool done = false
+
+    float extreme = na
+
+    float anchor = na
+    int anchorBar = na
+
+    bool pend = false
+    int pendCnt = 0
+    int absorbed = 0
+
+    float cBTop = na
+    float cBBot = na
+    float cRTop = na
+    float cRBot = na
+
+    line cline = na
+    label clabel = na
+
+var array<OB> bulls = array.new<OB>()
+var array<OB> bears = array.new<OB>()
+
+// ============================================================================
+// FILTER VALUES
+// ============================================================================
+
+float distanceATR = ta.atr(distanceATRLength)
+
+int htfSecondsRaw = timeframe.in_seconds(htf)
+
+int htfSeconds =
+     na(htfSecondsRaw) or htfSecondsRaw <= 0
+         ? timeframe.in_seconds(timeframe.period)
+         : htfSecondsRaw
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+f_deleteOB(OB o) =>
+    if not na(o.zone)
+        box.delete(o.zone)
+
+    if not na(o.cline)
+        line.delete(o.cline)
+
+    if not na(o.clabel)
+        label.delete(o.clabel)
+
+// Remove OBs that are too old or too far from current price.
+f_removeIrrelevantOBs(array<OB> objects) =>
+    int index = array.size(objects) - 1
+
+    while index >= 0
+        OB currentOB = array.get(objects, index)
+
+        float priceDistance =
+             math.abs(currentOB.midpoint - close)
+
+        bool tooFar =
+             not na(distanceATR) and
+             priceDistance > distanceATR * obMaxDistanceATR
+
+        int maximumAgeMilliseconds =
+             obMaxAge * htfSeconds * 1000
+
+        bool tooOld =
+             not na(currentOB.createdTime) and
+             time - currentOB.createdTime >
+             maximumAgeMilliseconds
+
+        if tooFar or tooOld
+            f_deleteOB(currentOB)
+            array.remove(objects, index)
+
+        index -= 1
+
+// Keep only the lowest and highest OB by price midpoint.
+f_keepPriceExtremes(array<OB> objects) =>
+    while array.size(objects) > 2
+        int objectCount = array.size(objects)
+
+        int lowestIndex = 0
+        int highestIndex = 0
+
+        OB firstOB = array.get(objects, 0)
+
+        float lowestPrice = firstOB.midpoint
+        float highestPrice = firstOB.midpoint
+
+        for i = 1 to objectCount - 1
+            OB currentOB = array.get(objects, i)
+
+            if currentOB.midpoint < lowestPrice
+                lowestPrice := currentOB.midpoint
+                lowestIndex := i
+
+            if currentOB.midpoint > highestPrice
+                highestPrice := currentOB.midpoint
+                highestIndex := i
+
+        int removeIndex = -1
+
+        // Remove an OB located between the lowest and highest.
+        for i = 0 to objectCount - 1
+            if removeIndex == -1 and
+               i != lowestIndex and
+               i != highestIndex
+
+                removeIndex := i
+
+        // Handles duplicate/equal price levels.
+        if removeIndex == -1
+            removeIndex := 0
+
+        OB removedOB = array.get(objects, removeIndex)
+
+        f_deleteOB(removedOB)
+        array.remove(objects, removeIndex)
+
+// ============================================================================
+// NEW ORDER BLOCKS
+// ============================================================================
+
+bool newBull =
+     showOB and
+     not na(bullTop) and
+     not na(bullBot) and
+     not na(bullLeft) and
+     (
+         na(bullLeft[1]) or
+         bullLeft != bullLeft[1]
+     )
+
+bool newBear =
+     showOB and
+     not na(bearTop) and
+     not na(bearBot) and
+     not na(bearLeft) and
+     (
+         na(bearLeft[1]) or
+         bearLeft != bearLeft[1]
+     )
+
+if newBull
+    float normalizedTop =
+         math.max(bullTop, bullBot)
+
+    float normalizedBottom =
+         math.min(bullTop, bullBot)
+
+    float zoneMidpoint =
+         math.avg(normalizedTop, normalizedBottom)
+
+    box bx = box.new(
+         left = bullLeft,
+         top = normalizedTop,
+         right = time,
+         bottom = normalizedBottom,
+         xloc = xloc.bar_time,
+         bgcolor = bullOBcol,
+         border_color = color.new(bullOBcol, 30),
+         border_width = 1
+    )
+
+    OB newOB = OB.new(
+         zone = bx,
+         top = normalizedTop,
+         bottom = normalizedBottom,
+         midpoint = zoneMidpoint,
+         createdTime = bullLeft,
+         bull = true
+    )
+
+    array.push(bulls, newOB)
+
+if newBear
+    float normalizedTop =
+         math.max(bearTop, bearBot)
+
+    float normalizedBottom =
+         math.min(bearTop, bearBot)
+
+    float zoneMidpoint =
+         math.avg(normalizedTop, normalizedBottom)
+
+    box bx = box.new(
+         left = bearLeft,
+         top = normalizedTop,
+         right = time,
+         bottom = normalizedBottom,
+         xloc = xloc.bar_time,
+         bgcolor = bearOBcol,
+         border_color = color.new(bearOBcol, 30),
+         border_width = 1
+    )
+
+    OB newOB = OB.new(
+         zone = bx,
+         top = normalizedTop,
+         bottom = normalizedBottom,
+         midpoint = zoneMidpoint,
+         createdTime = bearLeft,
+         bull = false
+    )
+
+    array.push(bears, newOB)
+
+// Filter on every bar so an OB is removed when it becomes old or too distant.
+f_removeIrrelevantOBs(bulls)
+f_removeIrrelevantOBs(bears)
+
+f_keepPriceExtremes(bulls)
+f_keepPriceExtremes(bears)
+
+// ============================================================================
+// CANDLE DIRECTION
+// ============================================================================
+
+bool isUp = close > open
+bool isDn = close < open
+
+bool firedBull = false
+bool firedBear = false
+
+// ============================================================================
+// BULLISH ORDER BLOCKS
+// ============================================================================
+
+int bi = array.size(bulls) - 1
+
+while bi >= 0
+    OB o = array.get(bulls, bi)
+
+    if not na(o.zone)
+        box.set_right(o.zone, time)
+
+    bool removed = false
+
+    // Bullish OB invalidation.
+    if not o.done and
+       barstate.isconfirmed and
+       close < o.bottom
+
+        if removeInvalid
+            f_deleteOB(o)
+            array.remove(bulls, bi)
+            removed := true
+        else
+            o.done := true
+
+    if not removed
+        bool tappedNow =
+             not o.tapped and
+             high >= o.bottom and
+             low <= o.top
+
+        if tappedNow
+            o.tapped := true
+            o.extreme := low
+
+            if isDn
+                o.anchor := open
+                o.anchorBar := bar_index
+
+        if o.tapped and not o.done
+            o.extreme :=
+                 na(o.extreme)
+                     ? low
+                     : math.min(o.extreme, low)
+
+            bool confirmed =
+                 not na(o.anchor) and
+                 (
+                     confirmBody
+                         ? close > o.anchor
+                         : high > o.anchor
+                 )
+
+            if confirmed
+                o.done := true
+
+                if showCISD
+                    o.cline := line.new(
+                         x1 = o.anchorBar,
+                         y1 = o.anchor,
+                         x2 = bar_index,
+                         y2 = o.anchor,
+                         xloc = xloc.bar_index,
+                         extend = extend.none,
+                         color = bullCISDcol,
+                         width = 2
+                    )
+
+                    if showCISDlbl
+                        o.clabel := label.new(
+                             x = bar_index,
+                             y = o.anchor,
+                             text = "Bull CISD",
+                             xloc = xloc.bar_index,
+                             yloc = yloc.price,
+                             style = label.style_label_lower_left,
+                             color = color.new(bullCISDcol, 80),
+                             textcolor = bullCISDcol,
+                             size = size.small
+                        )
+
+                firedBull := true
+
+            else if isDn
+                if o.pend
+                    bool bodyEng =
+                         open >= o.cBTop and
+                         close <= o.cBBot
+
+                    bool rangeEng =
+                         high >= o.cRTop and
+                         low <= o.cRBot
+
+                    bool eng =
+                         engulfMode == "Body"
+                             ? bodyEng
+                             : rangeEng
+
+                    if eng and
+                       o.absorbed + o.pendCnt <= maxAbsorb
+
+                        o.absorbed += o.pendCnt
+                        o.pend := false
+                        o.pendCnt := 0
+
+                    else
+                        o.anchor := open
+                        o.anchorBar := bar_index
+
+                        o.absorbed := 0
+                        o.pend := false
+                        o.pendCnt := 0
+
+                else if na(o.anchor)
+                    o.anchor := open
+                    o.anchorBar := bar_index
+
+            else if isUp and not na(o.anchor)
+                if o.pend
+                    o.cBTop :=
+                         math.max(o.cBTop, close)
+
+                    o.cBBot :=
+                         math.min(o.cBBot, open)
+
+                    o.cRTop :=
+                         math.max(o.cRTop, high)
+
+                    o.cRBot :=
+                         math.min(o.cRBot, low)
+
+                    o.pendCnt += 1
+
+                else
+                    o.pend := true
+                    o.cBTop := close
+                    o.cBBot := open
+                    o.cRTop := high
+                    o.cRBot := low
+                    o.pendCnt := 1
+
+    bi -= 1
+
+// ============================================================================
+// BEARISH ORDER BLOCKS
+// ============================================================================
+
+int ri = array.size(bears) - 1
+
+while ri >= 0
+    OB o = array.get(bears, ri)
+
+    if not na(o.zone)
+        box.set_right(o.zone, time)
+
+    bool removed = false
+
+    // Bearish OB invalidation.
+    if not o.done and
+       barstate.isconfirmed and
+       close > o.top
+
+        if removeInvalid
+            f_deleteOB(o)
+            array.remove(bears, ri)
+            removed := true
+        else
+            o.done := true
+
+    if not removed
+        bool tappedNow =
+             not o.tapped and
+             high >= o.bottom and
+             low <= o.top
+
+        if tappedNow
+            o.tapped := true
+            o.extreme := high
+
+            if isUp
+                o.anchor := open
+                o.anchorBar := bar_index
+
+        if o.tapped and not o.done
+            o.extreme :=
+                 na(o.extreme)
+                     ? high
+                     : math.max(o.extreme, high)
+
+            bool confirmed =
+                 not na(o.anchor) and
+                 (
+                     confirmBody
+                         ? close < o.anchor
+                         : low < o.anchor
+                 )
+
+            if confirmed
+                o.done := true
+
+                if showCISD
+                    o.cline := line.new(
+                         x1 = o.anchorBar,
+                         y1 = o.anchor,
+                         x2 = bar_index,
+                         y2 = o.anchor,
+                         xloc = xloc.bar_index,
+                         extend = extend.none,
+                         color = bearCISDcol,
+                         width = 2
+                    )
+
+                    if showCISDlbl
+                        o.clabel := label.new(
+                             x = bar_index,
+                             y = o.anchor,
+                             text = "Bear CISD",
+                             xloc = xloc.bar_index,
+                             yloc = yloc.price,
+                             style = label.style_label_upper_left,
+                             color = color.new(bearCISDcol, 80),
+                             textcolor = bearCISDcol,
+                             size = size.small
+                        )
+
+                firedBear := true
+
+            else if isUp
+                if o.pend
+                    bool bodyEng =
+                         close >= o.cBTop and
+                         open <= o.cBBot
+
+                    bool rangeEng =
+                         high >= o.cRTop and
+                         low <= o.cRBot
+
+                    bool eng =
+                         engulfMode == "Body"
+                             ? bodyEng
+                             : rangeEng
+
+                    if eng and
+                       o.absorbed + o.pendCnt <= maxAbsorb
+
+                        o.absorbed += o.pendCnt
+                        o.pend := false
+                        o.pendCnt := 0
+
+                    else
+                        o.anchor := open
+                        o.anchorBar := bar_index
+
+                        o.absorbed := 0
+                        o.pend := false
+                        o.pendCnt := 0
+
+                else if na(o.anchor)
+                    o.anchor := open
+                    o.anchorBar := bar_index
+
+            else if isDn and not na(o.anchor)
+                if o.pend
+                    o.cBTop :=
+                         math.max(o.cBTop, open)
+
+                    o.cBBot :=
+                         math.min(o.cBBot, close)
+
+                    o.cRTop :=
+                         math.max(o.cRTop, high)
+
+                    o.cRBot :=
+                         math.min(o.cRBot, low)
+
+                    o.pendCnt += 1
+
+                else
+                    o.pend := true
+                    o.cBTop := open
+                    o.cBBot := close
+                    o.cRTop := high
+                    o.cRBot := low
+                    o.pendCnt := 1
+
+    ri -= 1
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(
+     firedBull,
+     "Bullish CISD in OB",
+     "Bullish CISD confirmed after bullish OB tap."
+)
+
+alertcondition(
+     firedBear,
+     "Bearish CISD in OB",
+     "Bearish CISD confirmed after bearish OB tap."
+)
+
+alertcondition(
+     newBull,
+     "Bullish OB",
+     "New bullish order block formed."
+)
+
+alertcondition(
+     newBear,
+     "Bearish OB",
+     "New bearish order block formed."
+)
