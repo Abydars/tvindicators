@@ -13,7 +13,7 @@
 //  - Remove invalidated OBs.
 //  - Remove OBs that are too old.
 //  - Remove OBs that are too far from current price.
-//  - Keep only the two OBs nearest to current price per direction.
+//  - Every surviving OB is drawn and tracks its own CISD independently.
 //
 //  CISD:
 //  - Starts from the first candle of the delivery run.
@@ -24,9 +24,9 @@ indicator(
      "OB + CISD [SMC]",
      "OB+CISD",
      overlay = true,
-     max_boxes_count = 100,
-     max_lines_count = 100,
-     max_labels_count = 100
+     max_boxes_count = 500,
+     max_lines_count = 500,
+     max_labels_count = 500
 )
 
 // ============================================================================
@@ -355,29 +355,6 @@ f_removeIrrelevantOBs(array<OB> objects) =>
 
         index -= 1
 
-// Keep only the two OBs nearest to current price (the most actionable ones).
-f_keepPriceExtremes(array<OB> objects) =>
-    while array.size(objects) > 2
-        int objectCount = array.size(objects)
-
-        OB firstOB = array.get(objects, 0)
-
-        int farthestIndex = 0
-        float farthestDistance = math.abs(firstOB.midpoint - close)
-
-        for i = 1 to objectCount - 1
-            OB currentOB = array.get(objects, i)
-            float currentDistance = math.abs(currentOB.midpoint - close)
-
-            if currentDistance > farthestDistance
-                farthestDistance := currentDistance
-                farthestIndex := i
-
-        OB removedOB = array.get(objects, farthestIndex)
-
-        f_deleteOB(removedOB)
-        array.remove(objects, farthestIndex)
-
 // ============================================================================
 // NEW ORDER BLOCKS
 // ============================================================================
@@ -469,9 +446,6 @@ if newBear
 // Filter on every bar so an OB is removed when it becomes old or too distant.
 f_removeIrrelevantOBs(bulls)
 f_removeIrrelevantOBs(bears)
-
-f_keepPriceExtremes(bulls)
-f_keepPriceExtremes(bears)
 
 // ============================================================================
 // CANDLE DIRECTION
