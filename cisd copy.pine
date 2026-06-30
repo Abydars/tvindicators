@@ -1,0 +1,451 @@
+//@version=6
+indicator("MTF Order Blocks with LTF CISD", overlay = true, max_boxes_count = 500, max_lines_count = 500)
+
+//──────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────
+obTimeframe = input.timeframe("15", "Order Block Timeframe")
+
+showOrderBlocks = input.bool(false, "Show Order Blocks")
+showCisd = input.bool(true, "Show CISD")
+showConfirmedOnly = input.bool(true, "Show Confirmed CISD Only")
+
+showBullish = input.bool(true, "Show Bullish Setups")
+showBearish = input.bool(true, "Show Bearish Setups")
+
+useBodyOnly = input.bool(false, "Use OB Candle Body Only")
+
+cisdLookback = input.int(20, "Maximum CISD Sequence Lookback", minval = 1, maxval = 100)
+maxBlocks = input.int(250, "Maximum Setups", minval = 1, maxval = 450)
+
+bullFill = input.color(color.new(color.green, 85), "Bullish OB Fill")
+bullBorder = input.color(color.green, "Bullish OB Border")
+
+bearFill = input.color(color.new(color.red, 85), "Bearish OB Fill")
+bearBorder = input.color(color.red, "Bearish OB Border")
+
+bullCisdColor = input.color(color.lime, "Bullish CISD")
+bearCisdColor = input.color(color.red, "Bearish CISD")
+
+cisdWidth = input.int(4, "CISD Width", minval = 1, maxval = 4)
+
+maxBarsBeforeTap = input.int(20, "Maximum Bars Before Tap", minval = 1, maxval = 100)
+maxConfirmationBars = input.int(100, "Maximum Bars to Confirm CISD", minval = 1, maxval = 500)
+minimumSequenceCandles = input.int(1, "Minimum Consecutive Candles", minval = 1, maxval = 10)
+keepConfirmedBars = input.int(5000, "Keep Confirmed CISD For Bars", minval = 10, maxval = 20000)
+
+//──────────────────────────────────────────────────────────────────────
+// Pakistan session highlighting
+//──────────────────────────────────────────────────────────────────────
+string pakistanTimezone = "Asia/Karachi"
+
+bool inSession1 = not na(
+     time(
+         timeframe.period,
+         "1100-1400:1234567",
+         pakistanTimezone
+     )
+)
+
+bool inSession2 = not na(
+     time(
+         timeframe.period,
+         "1800-1930:1234567",
+         pakistanTimezone
+     )
+)
+
+color sessionColor = na
+
+if inSession1
+    sessionColor := color.new(color.blue, 88)
+else if inSession2
+    sessionColor := color.new(color.orange, 88)
+
+bgcolor(sessionColor, title = "Pakistan Sessions")
+
+//──────────────────────────────────────────────────────────────────────
+// Inside-candle chain
+//──────────────────────────────────────────────────────────────────────
+// Checks whether the target candle is contained by its immediate older
+// candle or by an uninterrupted chain of older inside candles.
+//
+// Example:
+// target = j
+// immediate older candle = j + 1
+//
+// 1. If j + 1 engulfs j, return true.
+// 2. Otherwise, continue only if j + 1 is inside j + 2.
+// 3. Then test whether j + 2 engulfs the original target.
+// 4. Repeat until the chain breaks or the target is engulfed.
+f_isInsideOlderChain(int targetIndex, int maxIndex) =>
+    bool targetIsEngulfed = false
+    bool chainIsValid = true
+
+    int olderIndex = targetIndex + 1
+
+    while olderIndex <= maxIndex and chainIsValid and not targetIsEngulfed
+        bool dataAvailable = not na(high[olderIndex]) and not na(low[olderIndex])
+
+        if not dataAvailable
+            chainIsValid := false
+        else
+            bool olderEngulfsTarget = high[olderIndex] >= high[targetIndex] and low[olderIndex] <= low[targetIndex]
+
+            if olderEngulfsTarget
+                targetIsEngulfed := true
+            else
+                int nextOlderIndex = olderIndex + 1
+
+                if nextOlderIndex <= maxIndex and not na(high[nextOlderIndex]) and not na(low[nextOlderIndex])
+                    bool currentOlderIsInsideNext = high[olderIndex] <= high[nextOlderIndex] and low[olderIndex] >= low[nextOlderIndex]
+
+                    if currentOlderIsInsideNext
+                        olderIndex := nextOlderIndex
+                    else
+                        chainIsValid := false
+                else
+                    chainIsValid := false
+
+    targetIsEngulfed
+
+//──────────────────────────────────────────────────────────────────────
+// Higher-timeframe OB detection
+//──────────────────────────────────────────────────────────────────────
+f_getObData() =>
+    bool bullSignal = close[1] < open[1] and close > high[1]
+    bool bearSignal = close[1] > open[1] and close < low[1]
+
+    float bullTop = useBodyOnly ? open[1] : high[1]
+    float bullBottom = low[1]
+
+    float bearTop = high[1]
+    float bearBottom = useBodyOnly ? open[1] : low[1]
+
+    [bullSignal, bearSignal, time[1], bullTop, bullBottom, bearTop, bearBottom, time]
+
+[bullSignalTf, bearSignalTf, obTimeTf, bullTopTf, bullBottomTf, bearTopTf, bearBottomTf, currentTfTime] = request.security(syminfo.tickerid, obTimeframe, f_getObData(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_off)
+
+bool newTfBar = ta.change(currentTfTime) != 0
+bool newBullOb = newTfBar and bullSignalTf
+bool newBearOb = newTfBar and bearSignalTf
+
+//──────────────────────────────────────────────────────────────────────
+// Bullish storage
+//──────────────────────────────────────────────────────────────────────
+var box[] bullBoxes = array.new_box()
+var float[] bullTops = array.new_float()
+var float[] bullBottoms = array.new_float()
+var bool[] bullTapped = array.new_bool()
+var bool[] bullConfirmed = array.new_bool()
+var float[] bullCisdLevels = array.new_float()
+var int[] bullCisdStartTimes = array.new_int()
+var line[] bullCisdLines = array.new_line()
+var int[] bullTapBars = array.new_int()
+var int[] bullCreationBars = array.new_int()
+var int[] bullConfirmBars = array.new_int()
+
+//──────────────────────────────────────────────────────────────────────
+// Bearish storage
+//──────────────────────────────────────────────────────────────────────
+var box[] bearBoxes = array.new_box()
+var float[] bearTops = array.new_float()
+var float[] bearBottoms = array.new_float()
+var bool[] bearTapped = array.new_bool()
+var bool[] bearConfirmed = array.new_bool()
+var float[] bearCisdLevels = array.new_float()
+var int[] bearCisdStartTimes = array.new_int()
+var line[] bearCisdLines = array.new_line()
+var int[] bearTapBars = array.new_int()
+var int[] bearCreationBars = array.new_int()
+var int[] bearConfirmBars = array.new_int()
+
+//──────────────────────────────────────────────────────────────────────
+// Create bullish setup
+//──────────────────────────────────────────────────────────────────────
+if newBullOb and showBullish and not na(obTimeTf)
+    box newBox = na
+
+    if showOrderBlocks
+        newBox := box.new(left = obTimeTf, top = bullTopTf, right = time, bottom = bullBottomTf, xloc = xloc.bar_time, extend = extend.right, bgcolor = bullFill, border_color = bullBorder, border_width = 1)
+
+    array.push(bullBoxes, newBox)
+    array.push(bullTops, bullTopTf)
+    array.push(bullBottoms, bullBottomTf)
+    array.push(bullTapped, false)
+    array.push(bullConfirmed, false)
+    array.push(bullCisdLevels, na)
+    array.push(bullCisdStartTimes, na)
+    array.push(bullCisdLines, na)
+    array.push(bullTapBars, na)
+    array.push(bullCreationBars, bar_index)
+    array.push(bullConfirmBars, na)
+
+//──────────────────────────────────────────────────────────────────────
+// Create bearish setup
+//──────────────────────────────────────────────────────────────────────
+if newBearOb and showBearish and not na(obTimeTf)
+    box newBox = na
+
+    if showOrderBlocks
+        newBox := box.new(left = obTimeTf, top = bearTopTf, right = time, bottom = bearBottomTf, xloc = xloc.bar_time, extend = extend.right, bgcolor = bearFill, border_color = bearBorder, border_width = 1)
+
+    array.push(bearBoxes, newBox)
+    array.push(bearTops, bearTopTf)
+    array.push(bearBottoms, bearBottomTf)
+    array.push(bearTapped, false)
+    array.push(bearConfirmed, false)
+    array.push(bearCisdLevels, na)
+    array.push(bearCisdStartTimes, na)
+    array.push(bearCisdLines, na)
+    array.push(bearTapBars, na)
+    array.push(bearCreationBars, bar_index)
+    array.push(bearConfirmBars, na)
+
+//──────────────────────────────────────────────────────────────────────
+// Process bullish OB taps and bullish CISD
+//──────────────────────────────────────────────────────────────────────
+if array.size(bullTops) > 0
+    for i = 0 to array.size(bullTops) - 1
+        bool wasTapped = array.get(bullTapped, i)
+        bool wasConfirmed = array.get(bullConfirmed, i)
+
+        if not wasConfirmed
+            float obTop = array.get(bullTops, i)
+            float obBottom = array.get(bullBottoms, i)
+
+            int creationBar = array.get(bullCreationBars, i)
+            bool overlapsOb = low <= obTop and high >= obBottom
+            bool tappedNow = bar_index > creationBar and overlapsOb
+
+            if not wasTapped and tappedNow
+                float highestHigh = na
+                int highestHighTime = na
+                int bearishCount = 0
+                bool continueSequence = true
+
+                int sequenceLimit = math.min(cisdLookback, maxBarsBeforeTap)
+
+                for j = 1 to sequenceLimit
+                    if continueSequence
+                        bool candleAvailable = not na(open[j]) and not na(close[j])
+                        bool bearishCandle = candleAvailable and close[j] < open[j]
+                        bool bullishCandle = candleAvailable and close[j] > open[j]
+                        bool dojiCandle = candleAvailable and close[j] == open[j]
+
+                        if bearishCandle
+                            bearishCount += 1
+
+                            if na(highestHigh) or high[j] > highestHigh
+                                highestHigh := high[j]
+                                highestHighTime := time[j]
+
+                        else if bullishCandle or dojiCandle
+                            bool ignoreInsideCandle = f_isInsideOlderChain(j, cisdLookback)
+
+                            if not ignoreInsideCandle
+                                continueSequence := false
+                        else
+                            continueSequence := false
+
+                if bearishCount >= minimumSequenceCandles and not na(highestHigh)
+                    line newLine = na
+
+                    if showCisd and not showConfirmedOnly
+                        newLine := line.new(
+                             x1 = highestHighTime,
+                             y1 = highestHigh,
+                             x2 = time_close,
+                             y2 = highestHigh,
+                             xloc = xloc.bar_time,
+                             extend = extend.none,
+                             color = bullCisdColor,
+                             width = cisdWidth
+                         )
+
+                    array.set(bullTapped, i, true)
+                    array.set(bullCisdLevels, i, highestHigh)
+                    array.set(bullCisdStartTimes, i, highestHighTime)
+                    array.set(bullCisdLines, i, newLine)
+                    array.set(bullTapBars, i, bar_index)
+
+            wasTapped := array.get(bullTapped, i)
+            wasConfirmed := array.get(bullConfirmed, i)
+
+            if wasTapped and not wasConfirmed
+                float cisdLevel = array.get(bullCisdLevels, i)
+                int cisdStartTime = array.get(bullCisdStartTimes, i)
+                line cisdLine = array.get(bullCisdLines, i)
+                int tapBar = array.get(bullTapBars, i)
+
+                if showCisd and not showConfirmedOnly and not na(cisdLine)
+                    line.set_x2(cisdLine, time_close)
+
+                bool invalidated = close < obBottom
+                bool confirmationExpired = maxConfirmationBars > 0 and not na(tapBar) and bar_index - tapBar > maxConfirmationBars
+
+                if invalidated or confirmationExpired
+                    array.set(bullConfirmed, i, true)
+                    if not na(cisdLine)
+                        line.delete(cisdLine)
+                        array.set(bullCisdLines, i, na)
+                else
+                    bool confirmedNow = not na(cisdLevel) and not na(tapBar) and bar_index > tapBar and close > cisdLevel
+
+                    if confirmedNow
+                        array.set(bullConfirmed, i, true)
+                        array.set(bullConfirmBars, i, bar_index)
+
+                        if showCisd
+                            if na(cisdLine)
+                                cisdLine := line.new(x1 = cisdStartTime, y1 = cisdLevel, x2 = time_close, y2 = cisdLevel, xloc = xloc.bar_time, extend = extend.none, color = bullCisdColor, width = cisdWidth)
+                                array.set(bullCisdLines, i, cisdLine)
+                            else
+                                line.set_x2(cisdLine, time_close)
+
+//──────────────────────────────────────────────────────────────────────
+// Process bearish OB taps and bearish CISD
+//──────────────────────────────────────────────────────────────────────
+if array.size(bearTops) > 0
+    for i = 0 to array.size(bearTops) - 1
+        bool wasTapped = array.get(bearTapped, i)
+        bool wasConfirmed = array.get(bearConfirmed, i)
+
+        if not wasConfirmed
+            float obTop = array.get(bearTops, i)
+            float obBottom = array.get(bearBottoms, i)
+
+            int creationBar = array.get(bearCreationBars, i)
+            bool overlapsOb = high >= obBottom and low <= obTop
+            bool tappedNow = bar_index > creationBar and overlapsOb
+
+            if not wasTapped and tappedNow
+                float lowestLow = na
+                int lowestLowTime = na
+                int bullishCount = 0
+                bool continueSequence = true
+
+                int sequenceLimit = math.min(cisdLookback, maxBarsBeforeTap)
+
+                for j = 1 to sequenceLimit
+                    if continueSequence
+                        bool candleAvailable = not na(open[j]) and not na(close[j])
+                        bool bullishCandle = candleAvailable and close[j] > open[j]
+                        bool bearishCandle = candleAvailable and close[j] < open[j]
+                        bool dojiCandle = candleAvailable and close[j] == open[j]
+
+                        if bullishCandle
+                            bullishCount += 1
+
+                            if na(lowestLow) or low[j] < lowestLow
+                                lowestLow := low[j]
+                                lowestLowTime := time[j]
+
+                        else if bearishCandle or dojiCandle
+                            bool ignoreInsideCandle = f_isInsideOlderChain(j, cisdLookback)
+
+                            if not ignoreInsideCandle
+                                continueSequence := false
+                        else
+                            continueSequence := false
+
+                if bullishCount >= minimumSequenceCandles and not na(lowestLow)
+                    line newLine = na
+
+                    if showCisd and not showConfirmedOnly
+                        newLine := line.new(
+                             x1 = lowestLowTime,
+                             y1 = lowestLow,
+                             x2 = time_close,
+                             y2 = lowestLow,
+                             xloc = xloc.bar_time,
+                             extend = extend.none,
+                             color = bearCisdColor,
+                             width = cisdWidth
+                         )
+
+                    array.set(bearTapped, i, true)
+                    array.set(bearCisdLevels, i, lowestLow)
+                    array.set(bearCisdStartTimes, i, lowestLowTime)
+                    array.set(bearCisdLines, i, newLine)
+                    array.set(bearTapBars, i, bar_index)
+
+            wasTapped := array.get(bearTapped, i)
+            wasConfirmed := array.get(bearConfirmed, i)
+
+            if wasTapped and not wasConfirmed
+                float cisdLevel = array.get(bearCisdLevels, i)
+                int cisdStartTime = array.get(bearCisdStartTimes, i)
+                line cisdLine = array.get(bearCisdLines, i)
+                int tapBar = array.get(bearTapBars, i)
+
+                if showCisd and not showConfirmedOnly and not na(cisdLine)
+                    line.set_x2(cisdLine, time_close)
+
+                bool invalidated = close > obTop
+                bool confirmationExpired = maxConfirmationBars > 0 and not na(tapBar) and bar_index - tapBar > maxConfirmationBars
+
+                if invalidated or confirmationExpired
+                    array.set(bearConfirmed, i, true)
+                    if not na(cisdLine)
+                        line.delete(cisdLine)
+                        array.set(bearCisdLines, i, na)
+                else
+                    bool confirmedNow = not na(cisdLevel) and not na(tapBar) and bar_index > tapBar and close < cisdLevel
+
+                    if confirmedNow
+                        array.set(bearConfirmed, i, true)
+                        array.set(bearConfirmBars, i, bar_index)
+
+                        if showCisd
+                            if na(cisdLine)
+                                cisdLine := line.new(x1 = cisdStartTime, y1 = cisdLevel, x2 = time_close, y2 = cisdLevel, xloc = xloc.bar_time, extend = extend.none, color = bearCisdColor, width = cisdWidth)
+                                array.set(bearCisdLines, i, cisdLine)
+                            else
+                                line.set_x2(cisdLine, time_close)
+
+//──────────────────────────────────────────────────────────────────────
+// Limit bullish setups
+//──────────────────────────────────────────────────────────────────────
+while array.size(bullTops) > maxBlocks
+    box oldBox = array.shift(bullBoxes)
+    line oldLine = array.shift(bullCisdLines)
+
+    if not na(oldBox)
+        box.delete(oldBox)
+
+    if not na(oldLine)
+        line.delete(oldLine)
+
+    array.shift(bullTops)
+    array.shift(bullBottoms)
+    array.shift(bullTapped)
+    array.shift(bullConfirmed)
+    array.shift(bullCisdLevels)
+    array.shift(bullCisdStartTimes)
+    array.shift(bullTapBars)
+    array.shift(bullCreationBars)
+    array.shift(bullConfirmBars)
+
+//──────────────────────────────────────────────────────────────────────
+// Limit bearish setups
+//──────────────────────────────────────────────────────────────────────
+while array.size(bearTops) > maxBlocks
+    box oldBox = array.shift(bearBoxes)
+    line oldLine = array.shift(bearCisdLines)
+
+    if not na(oldBox)
+        box.delete(oldBox)
+
+    if not na(oldLine)
+        line.delete(oldLine)
+
+    array.shift(bearTops)
+    array.shift(bearBottoms)
+    array.shift(bearTapped)
+    array.shift(bearConfirmed)
+    array.shift(bearCisdLevels)
+    array.shift(bearCisdStartTimes)
+    array.shift(bearTapBars)
+    array.shift(bearCreationBars)
+    array.shift(bearConfirmBars)

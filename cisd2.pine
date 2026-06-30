@@ -1,9 +1,10 @@
 //@version=6
 indicator(
-     "15m Sweep + 1m Body CISD",
+     "15m Sweep + 1m Body CISD + Position Blocks",
      overlay = true,
      max_lines_count = 500,
-     max_labels_count = 500
+     max_labels_count = 500,
+     max_boxes_count = 500
 )
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -16,8 +17,29 @@ color SWEEP_COLOR = color.rgb(41, 98, 255)
 color BULL_CISD_COLOR = color.rgb(0, 170, 120)
 color BEAR_CISD_COLOR = color.rgb(220, 60, 70)
 
+color PROFIT_BLOCK_COLOR = color.rgb(0, 170, 120)
+color RISK_BLOCK_COLOR = color.rgb(220, 60, 70)
+color POSITION_BORDER_COLOR = color.rgb(110, 110, 110)
+
 int MAX_15M_HISTORY = 40
-int MAX_SETUPS = 100
+int MAX_SAVED_LINES = 480
+int MAX_SAVED_LABELS = 480
+
+int SL_BUFFER_TICKS = 1
+
+int POSITION_BLOCK_LENGTH = 15
+int POSITION_BLOCK_TRANSPARENCY = 82
+
+float MIN_TP_R_MULTIPLE = 1.5
+float IDEAL_TP_R_MULTIPLE = 2.0
+float MAX_TP_R_MULTIPLE = 4.0
+float TARGET_ATR_BUFFER = 0.10
+
+string TARGET_TIMEFRAME = "60"
+
+int H1_PIVOT_LEFT = 2
+int H1_PIVOT_RIGHT = 2
+int MAX_H1_TARGETS = 30
 
 bool isOneMinute =
      timeframe.isminutes and
@@ -59,29 +81,226 @@ var array<label> savedLabels = array.new_label()
 f_saveLine(line newLine) =>
     array.push(savedLines, newLine)
 
-    if array.size(savedLines) > MAX_SETUPS * 2
+    if array.size(savedLines) > MAX_SAVED_LINES
         line oldLine = array.shift(savedLines)
         line.delete(oldLine)
 
 f_saveLabel(label newLabel) =>
     array.push(savedLabels, newLabel)
 
-    if array.size(savedLabels) > MAX_SETUPS * 2
+    if array.size(savedLabels) > MAX_SAVED_LABELS
         label oldLabel = array.shift(savedLabels)
         label.delete(oldLabel)
+
+var array<box> savedBoxes = array.new_box()
+
+f_saveBox(box newBox) =>
+    array.push(savedBoxes, newBox)
+
+    if array.size(savedBoxes) > 200
+        box oldBox = array.shift(savedBoxes)
+        box.delete(oldBox)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Draw a horizontal trade level
+//──────────────────────────────────────────────────────────────────────────────
+
+f_drawPositionBlock(
+     int startBar,
+     float entryPrice,
+     float stopPrice,
+     float targetPrice,
+     int direction
+ ) =>
+    int endBar =
+         startBar + POSITION_BLOCK_LENGTH
+
+    float rewardTop =
+         direction == 1
+         ? targetPrice
+         : entryPrice
+
+    float rewardBottom =
+         direction == 1
+         ? entryPrice
+         : targetPrice
+
+    float riskTop =
+         direction == 1
+         ? entryPrice
+         : stopPrice
+
+    float riskBottom =
+         direction == 1
+         ? stopPrice
+         : entryPrice
+
+    box rewardBox = box.new(
+         left = startBar,
+         top = rewardTop,
+         right = endBar,
+         bottom = rewardBottom,
+         xloc = xloc.bar_index,
+         border_color = color.new(
+              PROFIT_BLOCK_COLOR,
+              25
+         ),
+         border_width = 1,
+         bgcolor = color.new(
+              PROFIT_BLOCK_COLOR,
+              POSITION_BLOCK_TRANSPARENCY
+         )
+    )
+
+    box riskBox = box.new(
+         left = startBar,
+         top = riskTop,
+         right = endBar,
+         bottom = riskBottom,
+         xloc = xloc.bar_index,
+         border_color = color.new(
+              RISK_BLOCK_COLOR,
+              25
+         ),
+         border_width = 1,
+         bgcolor = color.new(
+              RISK_BLOCK_COLOR,
+              POSITION_BLOCK_TRANSPARENCY
+         )
+    )
+
+    line entryLine = line.new(
+         x1 = startBar,
+         y1 = entryPrice,
+         x2 = endBar,
+         y2 = entryPrice,
+         xloc = xloc.bar_index,
+         extend = extend.none,
+         color = POSITION_BORDER_COLOR,
+         width = 1,
+         style = line.style_dashed
+    )
+
+    f_saveBox(rewardBox)
+    f_saveBox(riskBox)
+    f_saveLine(entryLine)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Draw completed setup
+//
+// direction:
+//  1 = bullish
+// -1 = bearish
+//──────────────────────────────────────────────────────────────────────────────
 
 f_drawSetup(
      int sweepTime,
      float sweepPrice,
+     float sweepExtreme,
      int cisdSourceBar,
      float cisdPrice,
      int confirmationBar,
+     float entryPrice,
+     float target15m,
+     float target1h,
      int direction
  ) =>
     color cisdColor =
          direction == 1
          ? BULL_CISD_COLOR
          : BEAR_CISD_COLOR
+
+    float slBuffer =
+         syminfo.mintick * SL_BUFFER_TICKS
+
+    float stopPrice =
+         direction == 1
+         ? sweepExtreme - slBuffer
+         : sweepExtreme + slBuffer
+
+    float risk =
+         direction == 1
+         ? entryPrice - stopPrice
+         : stopPrice - entryPrice
+
+    bool validRisk =
+         risk > syminfo.mintick
+
+    float minimumTarget =
+         validRisk
+         ? direction == 1
+              ? entryPrice + risk * MIN_TP_R_MULTIPLE
+              : entryPrice - risk * MIN_TP_R_MULTIPLE
+         : na
+
+    float fallbackTarget =
+         validRisk
+         ? direction == 1
+              ? entryPrice + risk * IDEAL_TP_R_MULTIPLE
+              : entryPrice - risk * IDEAL_TP_R_MULTIPLE
+         : na
+
+    float maximumTarget =
+         validRisk
+         ? direction == 1
+              ? entryPrice + risk * MAX_TP_R_MULTIPLE
+              : entryPrice - risk * MAX_TP_R_MULTIPLE
+         : na
+
+    bool valid15mTarget =
+         not na(target15m) and not na(minimumTarget) and not na(maximumTarget) and
+         (
+              direction == 1
+              ? (target15m >= minimumTarget and target15m <= maximumTarget)
+              : (target15m <= minimumTarget and target15m >= maximumTarget)
+         )
+
+    bool valid1hTarget =
+         not na(target1h) and not na(minimumTarget) and not na(maximumTarget) and
+         (
+              direction == 1
+              ? (target1h >= minimumTarget and target1h <= maximumTarget)
+              : (target1h <= minimumTarget and target1h >= maximumTarget)
+         )
+
+    float rawTarget =
+         valid15mTarget
+         ? target15m
+         : valid1hTarget
+              ? target1h
+              : na
+
+    float finalTarget = na
+
+    if not na(rawTarget)
+        float targetBuffer =
+             ta.atr(14) * TARGET_ATR_BUFFER
+
+        float bufferedTarget =
+             direction == 1
+             ? rawTarget - targetBuffer
+             : rawTarget + targetBuffer
+
+        if direction == 1
+            finalTarget :=
+                 math.min(
+                      math.max(
+                           bufferedTarget,
+                           minimumTarget
+                      ),
+                      maximumTarget
+                 )
+        else
+            finalTarget :=
+                 math.max(
+                      math.min(
+                           bufferedTarget,
+                           minimumTarget
+                      ),
+                      maximumTarget
+                 )
+    else
+        finalTarget := fallbackTarget
 
     line sweepLine = line.new(
          x1 = sweepTime,
@@ -134,8 +353,27 @@ f_drawSetup(
 
     f_saveLine(sweepLine)
     f_saveLine(cisdLine)
+
     f_saveLabel(sweepLabel)
     f_saveLabel(cisdLabel)
+
+    bool validPosition =
+         validRisk and
+         not na(finalTarget) and
+         (
+              direction == 1
+              ? finalTarget > entryPrice
+              : finalTarget < entryPrice
+         )
+
+    if validPosition
+        f_drawPositionBlock(
+             confirmationBar,
+             entryPrice,
+             stopPrice,
+             finalTarget,
+             direction
+        )
 
 //──────────────────────────────────────────────────────────────────────────────
 // Completed 15m candle history
@@ -144,6 +382,7 @@ f_drawSetup(
 var array<int> completed15Times = array.new_int()
 var array<float> completed15Highs = array.new_float()
 var array<float> completed15Lows = array.new_float()
+
 var array<bool> completed15HighSwept = array.new_bool()
 var array<bool> completed15LowSwept = array.new_bool()
 
@@ -155,6 +394,7 @@ f_store15m(
     array.push(completed15Times, candleTime)
     array.push(completed15Highs, candleHigh)
     array.push(completed15Lows, candleLow)
+
     array.push(completed15HighSwept, false)
     array.push(completed15LowSwept, false)
 
@@ -162,11 +402,12 @@ f_store15m(
         array.shift(completed15Times)
         array.shift(completed15Highs)
         array.shift(completed15Lows)
+
         array.shift(completed15HighSwept)
         array.shift(completed15LowSwept)
 
 //──────────────────────────────────────────────────────────────────────────────
-// Find most recent unswept previous 15m high
+// Find most recent unswept previous 15m high that was swept
 //──────────────────────────────────────────────────────────────────────────────
 
 f_findSweptHigh(float candleHigh) =>
@@ -174,32 +415,44 @@ f_findSweptHigh(float candleHigh) =>
     int foundTime = na
     int foundIndex = na
 
-    int count = array.size(completed15Highs)
+    int count =
+         array.size(completed15Highs)
 
     if count > 0
         for offset = 0 to count - 1
-            int index = count - 1 - offset
+            int index =
+                 count - 1 - offset
 
             float level =
-                 array.get(completed15Highs, index)
+                 array.get(
+                      completed15Highs,
+                      index
+                 )
 
             bool alreadySwept =
-                 array.get(completed15HighSwept, index)
+                 array.get(
+                      completed15HighSwept,
+                      index
+                 )
 
             if not alreadySwept and
                candleHigh > level
 
                 foundPrice := level
+
                 foundTime :=
-                     array.get(completed15Times, index)
+                     array.get(
+                          completed15Times,
+                          index
+                     )
 
                 foundIndex := index
                 break
 
-    [foundPrice, foundTime, foundIndex]
+    [foundPrice,foundTime,foundIndex]
 
 //──────────────────────────────────────────────────────────────────────────────
-// Find most recent unswept previous 15m low
+// Find most recent unswept previous 15m low that was swept
 //──────────────────────────────────────────────────────────────────────────────
 
 f_findSweptLow(float candleLow) =>
@@ -207,35 +460,347 @@ f_findSweptLow(float candleLow) =>
     int foundTime = na
     int foundIndex = na
 
-    int count = array.size(completed15Lows)
+    int count =
+         array.size(completed15Lows)
 
     if count > 0
         for offset = 0 to count - 1
-            int index = count - 1 - offset
+            int index =
+                 count - 1 - offset
 
             float level =
-                 array.get(completed15Lows, index)
+                 array.get(
+                      completed15Lows,
+                      index
+                 )
 
             bool alreadySwept =
-                 array.get(completed15LowSwept, index)
+                 array.get(
+                      completed15LowSwept,
+                      index
+                 )
 
             if not alreadySwept and
                candleLow < level
 
                 foundPrice := level
+
                 foundTime :=
-                     array.get(completed15Times, index)
+                     array.get(
+                          completed15Times,
+                          index
+                     )
 
                 foundIndex := index
                 break
 
-    [foundPrice, foundTime, foundIndex]
+    [foundPrice,foundTime,foundIndex]
+
+f_findTargetHigh(float referencePrice) =>
+    float targetPrice = na
+
+    int count =
+         array.size(completed15Highs)
+
+    if count > 0
+        for index = 0 to count - 1
+            float level =
+                 array.get(
+                      completed15Highs,
+                      index
+                 )
+
+            bool alreadySwept =
+                 array.get(
+                      completed15HighSwept,
+                      index
+                 )
+
+            bool validLevel =
+                 not alreadySwept and
+                 level > referencePrice
+
+            if validLevel
+                targetPrice :=
+                     na(targetPrice)
+                     ? level
+                     : math.min(
+                          targetPrice,
+                          level
+                     )
+
+    targetPrice
+
+//──────────────────────────────────────────────────────────────────────────────
+// Find lowest unswept 15m low below price
+//
+// Bearish target: external sellside liquidity.
+//──────────────────────────────────────────────────────────────────────────────
+
+f_findTargetLow(float referencePrice) =>
+    float targetPrice = na
+
+    int count =
+         array.size(completed15Lows)
+
+    if count > 0
+        for index = 0 to count - 1
+            float level =
+                 array.get(
+                      completed15Lows,
+                      index
+                 )
+
+            bool alreadySwept =
+                 array.get(
+                      completed15LowSwept,
+                      index
+                 )
+
+            bool validLevel =
+                 not alreadySwept and
+                 level < referencePrice
+
+            if validLevel
+                targetPrice :=
+                     na(targetPrice)
+                     ? level
+                     : math.max(
+                          targetPrice,
+                          level
+                     )
+
+    targetPrice
+
+//──────────────────────────────────────────────────────────────────────────────
+// Confirmed 1H swing liquidity targets
+//──────────────────────────────────────────────────────────────────────────────
+
+[h1PivotHigh, h1PivotHighTime] = request.security(
+     syminfo.tickerid,
+     TARGET_TIMEFRAME,
+     [
+          ta.pivothigh(
+               high,
+               H1_PIVOT_LEFT,
+               H1_PIVOT_RIGHT
+          ),
+          not na(
+               ta.pivothigh(
+                    high,
+                    H1_PIVOT_LEFT,
+                    H1_PIVOT_RIGHT
+               )
+          )
+          ? time[H1_PIVOT_RIGHT]
+          : na
+     ],
+     lookahead = barmerge.lookahead_off
+)
+
+[h1PivotLow, h1PivotLowTime] = request.security(
+     syminfo.tickerid,
+     TARGET_TIMEFRAME,
+     [
+          ta.pivotlow(
+               low,
+               H1_PIVOT_LEFT,
+               H1_PIVOT_RIGHT
+          ),
+          not na(
+               ta.pivotlow(
+                    low,
+                    H1_PIVOT_LEFT,
+                    H1_PIVOT_RIGHT
+               )
+          )
+          ? time[H1_PIVOT_RIGHT]
+          : na
+     ],
+     lookahead = barmerge.lookahead_off
+)
+
+var array<float> h1TargetHighs = array.new_float()
+var array<float> h1TargetLows = array.new_float()
+
+var array<bool> h1TargetHighSwept = array.new_bool()
+var array<bool> h1TargetLowSwept = array.new_bool()
+
+bool newH1PivotHigh =
+     not na(h1PivotHigh) and
+     not na(h1PivotHighTime) and
+     (
+          na(h1PivotHighTime[1]) or
+          h1PivotHighTime != h1PivotHighTime[1]
+     )
+
+bool newH1PivotLow =
+     not na(h1PivotLow) and
+     not na(h1PivotLowTime) and
+     (
+          na(h1PivotLowTime[1]) or
+          h1PivotLowTime != h1PivotLowTime[1]
+     )
+
+if newH1PivotHigh
+    array.push(
+         h1TargetHighs,
+         h1PivotHigh
+    )
+
+    array.push(
+         h1TargetHighSwept,
+         false
+    )
+
+    if array.size(h1TargetHighs) > MAX_H1_TARGETS
+        array.shift(h1TargetHighs)
+        array.shift(h1TargetHighSwept)
+
+if newH1PivotLow
+    array.push(
+         h1TargetLows,
+         h1PivotLow
+    )
+
+    array.push(
+         h1TargetLowSwept,
+         false
+    )
+
+    if array.size(h1TargetLows) > MAX_H1_TARGETS
+        array.shift(h1TargetLows)
+        array.shift(h1TargetLowSwept)
+
+// Mark old 1H liquidity as swept.
+int h1HighCount =
+     array.size(h1TargetHighs)
+
+if h1HighCount > 0
+    for index = 0 to h1HighCount - 1
+        bool alreadySwept =
+             array.get(
+                  h1TargetHighSwept,
+                  index
+             )
+
+        float level =
+             array.get(
+                  h1TargetHighs,
+                  index
+             )
+
+        if not alreadySwept and high > level
+            array.set(
+                 h1TargetHighSwept,
+                 index,
+                 true
+            )
+
+int h1LowCount =
+     array.size(h1TargetLows)
+
+if h1LowCount > 0
+    for index = 0 to h1LowCount - 1
+        bool alreadySwept =
+             array.get(
+                  h1TargetLowSwept,
+                  index
+             )
+
+        float level =
+             array.get(
+                  h1TargetLows,
+                  index
+             )
+
+        if not alreadySwept and low < level
+            array.set(
+                 h1TargetLowSwept,
+                 index,
+                 true
+            )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Nearest unswept confirmed 1H high
+//──────────────────────────────────────────────────────────────────────────────
+
+f_findH1TargetHigh(float referencePrice) =>
+    float targetPrice = na
+
+    int count =
+         array.size(h1TargetHighs)
+
+    if count > 0
+        for index = 0 to count - 1
+            float level =
+                 array.get(
+                      h1TargetHighs,
+                      index
+                 )
+
+            bool alreadySwept =
+                 array.get(
+                      h1TargetHighSwept,
+                      index
+                 )
+
+            if not alreadySwept and
+               level > referencePrice
+
+                targetPrice :=
+                     na(targetPrice)
+                     ? level
+                     : math.min(
+                          targetPrice,
+                          level
+                     )
+
+    targetPrice
+
+//──────────────────────────────────────────────────────────────────────────────
+// Nearest unswept confirmed 1H low
+//──────────────────────────────────────────────────────────────────────────────
+
+f_findH1TargetLow(float referencePrice) =>
+    float targetPrice = na
+
+    int count =
+         array.size(h1TargetLows)
+
+    if count > 0
+        for index = 0 to count - 1
+            float level =
+                 array.get(
+                      h1TargetLows,
+                      index
+                 )
+
+            bool alreadySwept =
+                 array.get(
+                      h1TargetLowSwept,
+                      index
+                 )
+
+            if not alreadySwept and
+               level < referencePrice
+
+                targetPrice :=
+                     na(targetPrice)
+                     ? level
+                     : math.max(
+                          targetPrice,
+                          level
+                     )
+
+    targetPrice
 
 //──────────────────────────────────────────────────────────────────────────────
 // Active 15m candle built from 1m candles
 //──────────────────────────────────────────────────────────────────────────────
 
-int current15Time = time("15")
+int current15Time =
+     time("15")
 
 bool new15mCandle =
      ta.change(current15Time) != 0
@@ -244,9 +809,11 @@ bool lastMinuteOf15m =
      time_close == time_close("15")
 
 var int active15Time = na
+
 var float active15High = na
 var float active15Low = na
 var float active15Close = na
+
 var bool active15Finalized = false
 
 //──────────────────────────────────────────────────────────────────────────────
@@ -277,8 +844,13 @@ var int latestBearishBarIndex = na
 var int pendingDirection = 0
 
 var float pendingSweepPrice = na
+var float pendingSweepExtreme = na
+
 var int pendingSweepTime = na
 var int pendingSweepCloseTime = na
+
+var float pendingLiquidityTarget = na
+var float pendingH1Target = na
 
 var float pendingCisdPrice = na
 var int pendingCisdTime = na
@@ -289,13 +861,14 @@ var bool bearishMoveStarted = false
 var bool bullishMoveStarted = false
 
 //──────────────────────────────────────────────────────────────────────────────
-// Session reset
+// Reset pending setup helper logic
 //──────────────────────────────────────────────────────────────────────────────
 
 if sessionStarted
     array.clear(completed15Times)
     array.clear(completed15Highs)
     array.clear(completed15Lows)
+
     array.clear(completed15HighSwept)
     array.clear(completed15LowSwept)
 
@@ -314,9 +887,14 @@ if sessionStarted
     latestBearishBarIndex := na
 
     pendingDirection := 0
+
     pendingSweepPrice := na
+    pendingSweepExtreme := na
     pendingSweepTime := na
     pendingSweepCloseTime := na
+
+    pendingLiquidityTarget := na
+    pendingH1Target := na
 
     pendingCisdPrice := na
     pendingCisdTime := na
@@ -340,10 +918,16 @@ if isOneMinute and insideSession
 
     else
         active15High :=
-             math.max(active15High, high)
+             math.max(
+                  active15High,
+                  high
+             )
 
         active15Low :=
-             math.min(active15Low, low)
+             math.min(
+                  active15Low,
+                  low
+             )
 
         active15Close := close
 
@@ -358,7 +942,10 @@ float candleRange =
      high - low
 
 float averageBody =
-     ta.sma(math.abs(close - open), 20)
+     ta.sma(
+          math.abs(close - open),
+          20
+     )
 
 bool strongBearishDisplacement =
      close < open and
@@ -379,12 +966,22 @@ bool strongBullishDisplacement =
 //
 // Track the latest bullish candle's body low.
 // Lock it once bearish movement starts.
-// Confirm only when a bearish candle closes below that body level.
+// Confirm when a bearish displacement closes below that body level.
 //──────────────────────────────────────────────────────────────────────────────
 
 if isOneMinute and
    insideSession and
    pendingDirection == -1
+
+    // Keep tracking the highest wick throughout
+    // the complete sweep-to-CISD sequence.
+    pendingSweepExtreme :=
+         na(pendingSweepExtreme)
+         ? high
+         : math.max(
+              pendingSweepExtreme,
+              high
+         )
 
     if not pendingCisdLocked
         if close > open
@@ -400,10 +997,12 @@ if isOneMinute and
             pendingCisdLocked := true
 
     bool bearishCisd =
+         barstate.isconfirmed and
          pendingCisdLocked and
          not na(pendingCisdPrice) and
          not na(pendingCisdTime) and
          not na(pendingCisdBarIndex) and
+         not na(pendingSweepExtreme) and
          time > pendingCisdTime and
          close < pendingCisdPrice and
          strongBearishDisplacement
@@ -412,16 +1011,25 @@ if isOneMinute and
         f_drawSetup(
              pendingSweepTime,
              pendingSweepPrice,
+             pendingSweepExtreme,
              pendingCisdBarIndex,
              pendingCisdPrice,
              bar_index,
+             close,
+             pendingLiquidityTarget,
+             pendingH1Target,
              -1
         )
 
         pendingDirection := 0
+
         pendingSweepPrice := na
+        pendingSweepExtreme := na
         pendingSweepTime := na
         pendingSweepCloseTime := na
+
+        pendingLiquidityTarget := na
+        pendingH1Target := na
 
         pendingCisdPrice := na
         pendingCisdTime := na
@@ -436,12 +1044,22 @@ if isOneMinute and
 //
 // Track the latest bearish candle's body high.
 // Lock it once bullish movement starts.
-// Confirm only when a bullish candle closes above that body level.
+// Confirm when bullish displacement closes above that body level.
 //──────────────────────────────────────────────────────────────────────────────
 
 if isOneMinute and
    insideSession and
    pendingDirection == 1
+
+    // Keep tracking the lowest wick throughout
+    // the complete sweep-to-CISD sequence.
+    pendingSweepExtreme :=
+         na(pendingSweepExtreme)
+         ? low
+         : math.min(
+              pendingSweepExtreme,
+              low
+         )
 
     if not pendingCisdLocked
         if close < open
@@ -457,10 +1075,12 @@ if isOneMinute and
             pendingCisdLocked := true
 
     bool bullishCisd =
+         barstate.isconfirmed and
          pendingCisdLocked and
          not na(pendingCisdPrice) and
          not na(pendingCisdTime) and
          not na(pendingCisdBarIndex) and
+         not na(pendingSweepExtreme) and
          time > pendingCisdTime and
          close > pendingCisdPrice and
          strongBullishDisplacement
@@ -469,16 +1089,25 @@ if isOneMinute and
         f_drawSetup(
              pendingSweepTime,
              pendingSweepPrice,
+             pendingSweepExtreme,
              pendingCisdBarIndex,
              pendingCisdPrice,
              bar_index,
+             close,
+             pendingLiquidityTarget,
+             pendingH1Target,
              1
         )
 
         pendingDirection := 0
+
         pendingSweepPrice := na
+        pendingSweepExtreme := na
         pendingSweepTime := na
         pendingSweepCloseTime := na
+
+        pendingLiquidityTarget := na
+        pendingH1Target := na
 
         pendingCisdPrice := na
         pendingCisdTime := na
@@ -497,11 +1126,9 @@ if isOneMinute and
    lastMinuteOf15m and
    not active15Finalized
 
-    [sweptHighPrice, sweptHighTime, sweptHighIndex] =
-         f_findSweptHigh(active15High)
+    [sweptHighPrice,sweptHighTime,sweptHighIndex] = f_findSweptHigh(active15High)
 
-    [sweptLowPrice, sweptLowTime, sweptLowIndex] =
-         f_findSweptLow(active15Low)
+    [sweptLowPrice,sweptLowTime,sweptLowIndex] = f_findSweptLow(active15Low)
 
     bool highSweep =
          not na(sweptHighPrice)
@@ -523,6 +1150,13 @@ if isOneMinute and
     //──────────────────────────────────────────────────────────────────────────
 
     if bearishSweep
+        // Find target before storing the current sweep candle.
+        float bearishLiquidityTarget =
+             f_findTargetLow(close)
+
+        float bearishH1Target =
+             f_findH1TargetLow(close)
+
         array.set(
              completed15HighSwept,
              sweptHighIndex,
@@ -530,6 +1164,7 @@ if isOneMinute and
         )
 
         bool sameCandleCisd =
+             barstate.isconfirmed and
              not na(latestBullishBodyLow) and
              not na(latestBullishTime) and
              not na(latestBullishBarIndex) and
@@ -541,16 +1176,25 @@ if isOneMinute and
             f_drawSetup(
                  sweptHighTime,
                  sweptHighPrice,
+                 active15High,
                  latestBullishBarIndex,
                  latestBullishBodyLow,
                  bar_index,
+                 close,
+                 bearishLiquidityTarget,
+                 bearishH1Target,
                  -1
             )
 
             pendingDirection := 0
+
             pendingSweepPrice := na
+            pendingSweepExtreme := na
             pendingSweepTime := na
             pendingSweepCloseTime := na
+
+            pendingLiquidityTarget := na
+            pendingH1Target := na
 
             pendingCisdPrice := na
             pendingCisdTime := na
@@ -563,9 +1207,19 @@ if isOneMinute and
         else
             // Replace an older pending sweep with this immediate new one.
             pendingDirection := -1
+
             pendingSweepPrice := sweptHighPrice
+
+            // SL is placed above the actual sweep wick.
+            pendingSweepExtreme := active15High
+
             pendingSweepTime := sweptHighTime
             pendingSweepCloseTime := time
+
+            pendingLiquidityTarget :=
+                 bearishLiquidityTarget
+            pendingH1Target :=
+                 bearishH1Target
 
             pendingCisdLocked := false
             bearishMoveStarted := false
@@ -578,8 +1232,12 @@ if isOneMinute and
                 pendingCisdBarIndex := bar_index
 
             else
-                pendingCisdPrice := latestBullishBodyLow
-                pendingCisdTime := latestBullishTime
+                pendingCisdPrice :=
+                     latestBullishBodyLow
+
+                pendingCisdTime :=
+                     latestBullishTime
+
                 pendingCisdBarIndex :=
                      latestBullishBarIndex
 
@@ -588,6 +1246,13 @@ if isOneMinute and
     //──────────────────────────────────────────────────────────────────────────
 
     if bullishSweep
+        // Find target before storing the current sweep candle.
+        float bullishLiquidityTarget =
+             f_findTargetHigh(close)
+
+        float bullishH1Target =
+             f_findH1TargetHigh(close)
+
         array.set(
              completed15LowSwept,
              sweptLowIndex,
@@ -595,6 +1260,7 @@ if isOneMinute and
         )
 
         bool sameCandleCisd =
+             barstate.isconfirmed and
              not na(latestBearishBodyHigh) and
              not na(latestBearishTime) and
              not na(latestBearishBarIndex) and
@@ -606,16 +1272,25 @@ if isOneMinute and
             f_drawSetup(
                  sweptLowTime,
                  sweptLowPrice,
+                 active15Low,
                  latestBearishBarIndex,
                  latestBearishBodyHigh,
                  bar_index,
+                 close,
+                 bullishLiquidityTarget,
+                 bullishH1Target,
                  1
             )
 
             pendingDirection := 0
+
             pendingSweepPrice := na
+            pendingSweepExtreme := na
             pendingSweepTime := na
             pendingSweepCloseTime := na
+
+            pendingLiquidityTarget := na
+            pendingH1Target := na
 
             pendingCisdPrice := na
             pendingCisdTime := na
@@ -627,9 +1302,19 @@ if isOneMinute and
 
         else
             pendingDirection := 1
+
             pendingSweepPrice := sweptLowPrice
+
+            // SL is placed below the actual sweep wick.
+            pendingSweepExtreme := active15Low
+
             pendingSweepTime := sweptLowTime
             pendingSweepCloseTime := time
+
+            pendingLiquidityTarget :=
+                 bullishLiquidityTarget
+            pendingH1Target :=
+                 bullishH1Target
 
             pendingCisdLocked := false
             bearishMoveStarted := false
@@ -642,12 +1327,16 @@ if isOneMinute and
                 pendingCisdBarIndex := bar_index
 
             else
-                pendingCisdPrice := latestBearishBodyHigh
-                pendingCisdTime := latestBearishTime
+                pendingCisdPrice :=
+                     latestBearishBodyHigh
+
+                pendingCisdTime :=
+                     latestBearishTime
+
                 pendingCisdBarIndex :=
                      latestBearishBarIndex
 
-    // Store completed 15m candle after evaluating its sweep.
+    // Store completed 15m candle after evaluating its sweep and target.
     f_store15m(
          active15Time,
          active15High,
@@ -693,9 +1382,14 @@ if sessionEnded
     latestBearishBarIndex := na
 
     pendingDirection := 0
+
     pendingSweepPrice := na
+    pendingSweepExtreme := na
     pendingSweepTime := na
     pendingSweepCloseTime := na
+
+    pendingLiquidityTarget := na
+    pendingH1Target := na
 
     pendingCisdPrice := na
     pendingCisdTime := na
