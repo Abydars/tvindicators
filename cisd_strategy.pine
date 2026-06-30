@@ -1,0 +1,1209 @@
+//@version=6
+strategy(
+     "15m Sweep + 1m Body CISD Strategy",
+     overlay = true,
+     pyramiding = 0,
+     max_lines_count = 500,
+     max_labels_count = 500,
+     max_boxes_count = 500,
+     process_orders_on_close = true,
+     calc_on_order_fills = true,
+     margin_long = 1,
+     margin_short = 1
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Inputs
+//──────────────────────────────────────────────────────────────────────────────
+
+float rrMultiple = input.float(
+     5.0,
+     "Target R Multiple",
+     minval = 0.5,
+     step = 0.5,
+     group = "Trade Execution"
+)
+
+int stopBufferTicks = input.int(
+     0,
+     "Stop Buffer Ticks",
+     minval = 0,
+     group = "Trade Execution"
+)
+
+bool closeAtSessionEnd = input.bool(
+     false,
+     "Close Open Trade at Session End",
+     group = "Trade Execution"
+)
+
+bool showPositionBlocks = input.bool(
+     true,
+     "Show Position Blocks",
+     group = "Trade Display"
+)
+
+bool showEntryLine = input.bool(
+     true,
+     "Show Entry Line",
+     group = "Trade Display"
+)
+
+float investmentPercent = input.float(
+     2.0,
+     "Investment per Trade %",
+     minval = 0.1,
+     maxval = 100.0,
+     step = 0.1,
+     group = "Position Sizing"
+)
+
+float leverage = input.float(
+     100.0,
+     "Leverage",
+     minval = 1.0,
+     maxval = 100.0,
+     step = 1.0,
+     group = "Position Sizing"
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// HTF Bias Gate
+//──────────────────────────────────────────────────────────────────────────────
+
+bool useBiasGate = input.bool(
+     true, "Enable HTF Bias Gate", group = "HTF Bias")
+
+string biasMode = input.string(
+     "Structure (BOS)", "Bias Mode",
+     options = ["Structure (BOS)", "Trend Proxy (EMA)"], group = "HTF Bias")
+
+string htfTF = input.timeframe(
+     "60", "HTF Timeframe", group = "HTF Bias")
+
+int pivotLen = input.int(
+     2, "HTF Pivot Lookback", minval = 1, group = "HTF Bias")
+
+int emaLen = input.int(
+     50, "Trend Proxy EMA Length", minval = 1, group = "HTF Bias")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Fixed settings
+//──────────────────────────────────────────────────────────────────────────────
+
+string TZ = "Asia/Karachi"
+
+color SWEEP_COLOR = color.rgb(41, 98, 255)
+color BULL_CISD_COLOR = color.rgb(0, 170, 120)
+color BEAR_CISD_COLOR = color.rgb(220, 60, 70)
+
+color ENTRY_COLOR = color.rgb(110, 110, 110)
+color STOP_COLOR = color.rgb(220, 60, 70)
+color TARGET_COLOR = color.rgb(0, 170, 120)
+
+int MAX_15M_HISTORY = 40
+int MAX_SETUPS = 100
+
+bool isOneMinute =
+     timeframe.isminutes and
+     timeframe.multiplier == 1
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pakistan sessions
+//──────────────────────────────────────────────────────────────────────────────
+
+bool sessionOne =
+     not na(time(timeframe.period, "1100-1400", TZ))
+
+bool sessionTwo =
+     not na(time(timeframe.period, "1800-1930", TZ))
+
+bool insideSession =
+     sessionOne or sessionTwo
+
+bool sessionStarted =
+     insideSession and
+     not insideSession[1]
+
+bool sessionEnded =
+     not insideSession and
+     insideSession[1]
+
+bgcolor(
+     insideSession
+     ? color.new(color.gray, 90)
+     : na,
+     title = "Pakistan Sessions"
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Drawing storage
+//──────────────────────────────────────────────────────────────────────────────
+
+var array<line> savedLines = array.new_line()
+var array<label> savedLabels = array.new_label()
+var array<box> savedBoxes = array.new_box()
+
+f_saveLine(line newLine) =>
+    array.push(savedLines, newLine)
+
+    if array.size(savedLines) > MAX_SETUPS * 5
+        line oldLine = array.shift(savedLines)
+        line.delete(oldLine)
+
+f_saveLabel(label newLabel) =>
+    array.push(savedLabels, newLabel)
+
+    if array.size(savedLabels) > MAX_SETUPS * 3
+        label oldLabel = array.shift(savedLabels)
+        label.delete(oldLabel)
+
+f_saveBox(box newBox) =>
+    array.push(savedBoxes, newBox)
+
+    if array.size(savedBoxes) > MAX_SETUPS * 2
+        box oldBox = array.shift(savedBoxes)
+        box.delete(oldBox)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Draw sweep and CISD
+//──────────────────────────────────────────────────────────────────────────────
+
+f_drawSetup(
+     int sweepTime,
+     float sweepPrice,
+     int cisdSourceBar,
+     float cisdPrice,
+     int confirmationBar,
+     int direction
+ ) =>
+    color cisdColor =
+         direction == 1
+         ? BULL_CISD_COLOR
+         : BEAR_CISD_COLOR
+
+    line sweepLine = line.new(
+         x1 = sweepTime,
+         y1 = sweepPrice,
+         x2 = time,
+         y2 = sweepPrice,
+         xloc = xloc.bar_time,
+         extend = extend.none,
+         color = SWEEP_COLOR,
+         width = 1
+     )
+
+    line cisdLine = line.new(
+         x1 = cisdSourceBar,
+         y1 = cisdPrice,
+         x2 = confirmationBar,
+         y2 = cisdPrice,
+         xloc = xloc.bar_index,
+         extend = extend.none,
+         color = cisdColor,
+         width = 2
+     )
+
+    label sweepLabel = label.new(
+         x = sweepTime,
+         y = sweepPrice,
+         text = "Sweep",
+         xloc = xloc.bar_time,
+         yloc = yloc.price,
+         style = label.style_none,
+         textcolor = SWEEP_COLOR,
+         size = size.small
+     )
+
+    label cisdLabel = label.new(
+         x = confirmationBar,
+         y = cisdPrice,
+         text = direction == 1
+              ? "Bull CISD"
+              : "Bear CISD",
+         xloc = xloc.bar_index,
+         yloc = yloc.price,
+         style = direction == -1
+              ? label.style_label_down
+              : label.style_label_up,
+         color = color.new(color.white, 100),
+         textcolor = cisdColor,
+         size = size.small
+     )
+
+    f_saveLine(sweepLine)
+    f_saveLine(cisdLine)
+    f_saveLabel(sweepLabel)
+    f_saveLabel(cisdLabel)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Completed 15m candle history
+//──────────────────────────────────────────────────────────────────────────────
+
+var array<int> completed15Times = array.new_int()
+var array<float> completed15Highs = array.new_float()
+var array<float> completed15Lows = array.new_float()
+var array<bool> completed15HighSwept = array.new_bool()
+var array<bool> completed15LowSwept = array.new_bool()
+
+f_store15m(
+     int candleTime,
+     float candleHigh,
+     float candleLow
+ ) =>
+    array.push(completed15Times, candleTime)
+    array.push(completed15Highs, candleHigh)
+    array.push(completed15Lows, candleLow)
+    array.push(completed15HighSwept, false)
+    array.push(completed15LowSwept, false)
+
+    if array.size(completed15Times) > MAX_15M_HISTORY
+        array.shift(completed15Times)
+        array.shift(completed15Highs)
+        array.shift(completed15Lows)
+        array.shift(completed15HighSwept)
+        array.shift(completed15LowSwept)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Find most recent unswept 15m high
+//──────────────────────────────────────────────────────────────────────────────
+
+f_findSweptHigh(float candleHigh) =>
+    float foundPrice = na
+    int foundTime = na
+    int foundIndex = na
+
+    int count = array.size(completed15Highs)
+
+    if count > 0
+        for offset = 0 to count - 1
+            int index = count - 1 - offset
+
+            float level =
+                 array.get(completed15Highs, index)
+
+            bool alreadySwept =
+                 array.get(completed15HighSwept, index)
+
+            if not alreadySwept and
+               candleHigh > level
+
+                foundPrice := level
+                foundTime :=
+                     array.get(completed15Times, index)
+
+                foundIndex := index
+                break
+
+    [foundPrice, foundTime, foundIndex]
+
+//──────────────────────────────────────────────────────────────────────────────
+// Find most recent unswept 15m low
+//──────────────────────────────────────────────────────────────────────────────
+
+f_findSweptLow(float candleLow) =>
+    float foundPrice = na
+    int foundTime = na
+    int foundIndex = na
+
+    int count = array.size(completed15Lows)
+
+    if count > 0
+        for offset = 0 to count - 1
+            int index = count - 1 - offset
+
+            float level =
+                 array.get(completed15Lows, index)
+
+            bool alreadySwept =
+                 array.get(completed15LowSwept, index)
+
+            if not alreadySwept and
+               candleLow < level
+
+                foundPrice := level
+                foundTime :=
+                     array.get(completed15Times, index)
+
+                foundIndex := index
+                break
+
+    [foundPrice, foundTime, foundIndex]
+
+//──────────────────────────────────────────────────────────────────────────────
+// Active 15m candle
+//──────────────────────────────────────────────────────────────────────────────
+
+int current15Time = time("15")
+
+bool new15mCandle =
+     ta.change(current15Time) != 0
+
+bool lastMinuteOf15m =
+     time_close == time_close("15")
+
+var int active15Time = na
+var float active15High = na
+var float active15Low = na
+var float active15Close = na
+var bool active15Finalized = false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Latest opposite candle body references
+//──────────────────────────────────────────────────────────────────────────────
+
+var float latestBullishBodyLow = na
+var int latestBullishTime = na
+var int latestBullishBarIndex = na
+
+var float latestBearishBodyHigh = na
+var int latestBearishTime = na
+var int latestBearishBarIndex = na
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pending sweep state
+//
+// -1 = high sweep, waiting for bearish CISD
+// +1 = low sweep, waiting for bullish CISD
+//──────────────────────────────────────────────────────────────────────────────
+
+var int pendingDirection = 0
+
+var float pendingSweptLevel = na
+var float pendingSweepExtreme = na
+var int pendingSweepTime = na
+var int pendingSweepCloseTime = na
+
+var float pendingCisdPrice = na
+var int pendingCisdTime = na
+var int pendingCisdBarIndex = na
+
+var bool pendingCisdLocked = false
+var bool bearishMoveStarted = false
+var bool bullishMoveStarted = false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Active trade display state
+//──────────────────────────────────────────────────────────────────────────────
+
+var int tradeDirection = 0
+
+var float tradeEntryPrice = na
+var float tradeStopLoss = na
+var float tradeTarget = na
+
+var box currentRiskBox = na
+var box currentRewardBox = na
+var line currentEntryLine = na
+
+var int knownClosedTrades = 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// Trade creation signals
+//──────────────────────────────────────────────────────────────────────────────
+
+bool createLongTrade = false
+bool createShortTrade = false
+
+float signalEntryPrice = na
+float signalStopPrice = na
+
+//──────────────────────────────────────────────────────────────────────────────
+// Session reset
+//──────────────────────────────────────────────────────────────────────────────
+
+if sessionStarted
+    array.clear(completed15Times)
+    array.clear(completed15Highs)
+    array.clear(completed15Lows)
+    array.clear(completed15HighSwept)
+    array.clear(completed15LowSwept)
+
+    active15Time := current15Time
+    active15High := high
+    active15Low := low
+    active15Close := close
+    active15Finalized := false
+
+    latestBullishBodyLow := na
+    latestBullishTime := na
+    latestBullishBarIndex := na
+
+    latestBearishBodyHigh := na
+    latestBearishTime := na
+    latestBearishBarIndex := na
+
+    pendingDirection := 0
+
+    pendingSweptLevel := na
+    pendingSweepExtreme := na
+    pendingSweepTime := na
+    pendingSweepCloseTime := na
+
+    pendingCisdPrice := na
+    pendingCisdTime := na
+    pendingCisdBarIndex := na
+
+    pendingCisdLocked := false
+    bearishMoveStarted := false
+    bullishMoveStarted := false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Build current 15m candle from 1m candles
+//──────────────────────────────────────────────────────────────────────────────
+
+if isOneMinute and insideSession
+    if na(active15Time) or new15mCandle
+        active15Time := current15Time
+        active15High := high
+        active15Low := low
+        active15Close := close
+        active15Finalized := false
+
+    else
+        active15High :=
+             math.max(active15High, high)
+
+        active15Low :=
+             math.min(active15Low, low)
+
+        active15Close := close
+
+//──────────────────────────────────────────────────────────────────────────────
+// Strong displacement filter
+//──────────────────────────────────────────────────────────────────────────────
+
+float candleBody =
+     math.abs(close - open)
+
+float candleRange =
+     high - low
+
+float averageBody =
+     ta.sma(math.abs(close - open), 20)
+
+bool strongBearishDisplacement =
+     close < open and
+     not na(averageBody) and
+     candleBody >= averageBody * 1.5 and
+     candleRange > 0 and
+     candleBody / candleRange >= 0.60
+
+bool strongBullishDisplacement =
+     close > open and
+     not na(averageBody) and
+     candleBody >= averageBody * 1.5 and
+     candleRange > 0 and
+     candleBody / candleRange >= 0.60
+
+//──────────────────────────────────────────────────────────────────────────────
+// HTF directional bias
+//──────────────────────────────────────────────────────────────────────────────
+
+float htfClose = request.security(
+     syminfo.tickerid, htfTF, close[1],
+     lookahead = barmerge.lookahead_on)
+
+float htfPH = request.security(
+     syminfo.tickerid, htfTF, ta.pivothigh(pivotLen, pivotLen)[1],
+     lookahead = barmerge.lookahead_on)
+
+float htfPL = request.security(
+     syminfo.tickerid, htfTF, ta.pivotlow(pivotLen, pivotLen)[1],
+     lookahead = barmerge.lookahead_on)
+
+float htfEma = request.security(
+     syminfo.tickerid, htfTF, ta.ema(close, emaLen)[1],
+     lookahead = barmerge.lookahead_on)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var int   htfBias       = 0
+
+if not na(htfPH)
+    lastSwingHigh := htfPH
+if not na(htfPL)
+    lastSwingLow := htfPL
+
+if biasMode == "Structure (BOS)"
+    if not na(lastSwingHigh) and not na(htfClose) and htfClose > lastSwingHigh
+        htfBias := 1
+    if not na(lastSwingLow) and not na(htfClose) and htfClose < lastSwingLow
+        htfBias := -1
+else
+    if not na(htfClose) and not na(htfEma)
+        htfBias := htfClose > htfEma ? 1 : -1
+
+// neutral (0) permits both sides; for strict directional-only,
+// change to  htfBias < 0  and  htfBias > 0
+bool biasAllowsShort = not useBiasGate or htfBias <= 0
+bool biasAllowsLong  = not useBiasGate or htfBias >= 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pending bearish CISD
+//──────────────────────────────────────────────────────────────────────────────
+
+if isOneMinute and
+   insideSession and
+   pendingDirection == -1
+
+    if not pendingCisdLocked
+        if close > open
+            pendingCisdPrice := open
+            pendingCisdTime := time
+            pendingCisdBarIndex := bar_index
+
+        if close < open and
+           not na(pendingCisdTime) and
+           time > pendingCisdTime
+
+            bearishMoveStarted := true
+            pendingCisdLocked := true
+
+    bool bearishCisd =
+         pendingCisdLocked and
+         not na(pendingCisdPrice) and
+         not na(pendingCisdTime) and
+         not na(pendingCisdBarIndex) and
+         time > pendingCisdTime and
+         close < pendingCisdPrice and
+         strongBearishDisplacement
+
+    if bearishCisd
+        f_drawSetup(
+             pendingSweepTime,
+             pendingSweptLevel,
+             pendingCisdBarIndex,
+             pendingCisdPrice,
+             bar_index,
+             -1
+        )
+
+        bool canEnterShort =
+             strategy.position_size == 0 and
+             not na(pendingSweepExtreme) and
+             biasAllowsShort
+
+        if canEnterShort
+            createShortTrade := true
+            signalEntryPrice := close
+
+            signalStopPrice :=
+                 pendingSweepExtreme +
+                 syminfo.mintick * stopBufferTicks
+
+        pendingDirection := 0
+
+        pendingSweptLevel := na
+        pendingSweepExtreme := na
+        pendingSweepTime := na
+        pendingSweepCloseTime := na
+
+        pendingCisdPrice := na
+        pendingCisdTime := na
+        pendingCisdBarIndex := na
+
+        pendingCisdLocked := false
+        bearishMoveStarted := false
+        bullishMoveStarted := false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pending bullish CISD
+//──────────────────────────────────────────────────────────────────────────────
+
+if isOneMinute and
+   insideSession and
+   pendingDirection == 1
+
+    if not pendingCisdLocked
+        if close < open
+            pendingCisdPrice := open
+            pendingCisdTime := time
+            pendingCisdBarIndex := bar_index
+
+        if close > open and
+           not na(pendingCisdTime) and
+           time > pendingCisdTime
+
+            bullishMoveStarted := true
+            pendingCisdLocked := true
+
+    bool bullishCisd =
+         pendingCisdLocked and
+         not na(pendingCisdPrice) and
+         not na(pendingCisdTime) and
+         not na(pendingCisdBarIndex) and
+         time > pendingCisdTime and
+         close > pendingCisdPrice and
+         strongBullishDisplacement
+
+    if bullishCisd
+        f_drawSetup(
+             pendingSweepTime,
+             pendingSweptLevel,
+             pendingCisdBarIndex,
+             pendingCisdPrice,
+             bar_index,
+             1
+        )
+
+        bool canEnterLong =
+             strategy.position_size == 0 and
+             not na(pendingSweepExtreme) and
+             biasAllowsLong
+
+        if canEnterLong
+            createLongTrade := true
+            signalEntryPrice := close
+
+            signalStopPrice :=
+                 pendingSweepExtreme -
+                 syminfo.mintick * stopBufferTicks
+
+        pendingDirection := 0
+
+        pendingSweptLevel := na
+        pendingSweepExtreme := na
+        pendingSweepTime := na
+        pendingSweepCloseTime := na
+
+        pendingCisdPrice := na
+        pendingCisdTime := na
+        pendingCisdBarIndex := na
+
+        pendingCisdLocked := false
+        bearishMoveStarted := false
+        bullishMoveStarted := false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Finalize 15m candle and detect sweep
+//──────────────────────────────────────────────────────────────────────────────
+
+if isOneMinute and
+   insideSession and
+   lastMinuteOf15m and
+   not active15Finalized
+
+    [sweptHighPrice, sweptHighTime, sweptHighIndex] =
+         f_findSweptHigh(active15High)
+
+    [sweptLowPrice, sweptLowTime, sweptLowIndex] =
+         f_findSweptLow(active15Low)
+
+    bool highSweep =
+         not na(sweptHighPrice)
+
+    bool lowSweep =
+         not na(sweptLowPrice)
+
+    bool bearishSweep =
+         highSweep and
+         not lowSweep
+
+    bool bullishSweep =
+         lowSweep and
+         not highSweep
+
+    //──────────────────────────────────────────────────────────────────────────
+    // High sweep
+    //──────────────────────────────────────────────────────────────────────────
+
+    if bearishSweep
+        array.set(
+             completed15HighSwept,
+             sweptHighIndex,
+             true
+        )
+
+        bool sameCandleBearishCisd =
+             not na(latestBullishBodyLow) and
+             not na(latestBullishTime) and
+             not na(latestBullishBarIndex) and
+             time > latestBullishTime and
+             close < latestBullishBodyLow and
+             strongBearishDisplacement
+
+        if sameCandleBearishCisd
+            f_drawSetup(
+                 sweptHighTime,
+                 sweptHighPrice,
+                 latestBullishBarIndex,
+                 latestBullishBodyLow,
+                 bar_index,
+                 -1
+            )
+
+            bool canEnterShort =
+                 strategy.position_size == 0 and
+                 not createLongTrade and
+                 not createShortTrade and
+                 biasAllowsShort
+
+            if canEnterShort
+                createShortTrade := true
+                signalEntryPrice := close
+
+                signalStopPrice :=
+                     active15High +
+                     syminfo.mintick * stopBufferTicks
+
+            pendingDirection := 0
+            pendingSweptLevel := na
+            pendingSweepExtreme := na
+            pendingSweepTime := na
+            pendingSweepCloseTime := na
+            pendingCisdPrice := na
+            pendingCisdTime := na
+            pendingCisdBarIndex := na
+            pendingCisdLocked := false
+            bearishMoveStarted := false
+            bullishMoveStarted := false
+
+        else
+            pendingDirection := -1
+
+            pendingSweptLevel := sweptHighPrice
+            pendingSweepExtreme := active15High
+            pendingSweepTime := sweptHighTime
+            pendingSweepCloseTime := time
+
+            pendingCisdLocked := false
+            bearishMoveStarted := false
+            bullishMoveStarted := false
+
+            if close > open
+                pendingCisdPrice := open
+                pendingCisdTime := time
+                pendingCisdBarIndex := bar_index
+
+            else
+                pendingCisdPrice :=
+                     latestBullishBodyLow
+
+                pendingCisdTime :=
+                     latestBullishTime
+
+                pendingCisdBarIndex :=
+                     latestBullishBarIndex
+
+    //──────────────────────────────────────────────────────────────────────────
+    // Low sweep
+    //──────────────────────────────────────────────────────────────────────────
+
+    if bullishSweep
+        array.set(
+             completed15LowSwept,
+             sweptLowIndex,
+             true
+        )
+
+        bool sameCandleBullishCisd =
+             not na(latestBearishBodyHigh) and
+             not na(latestBearishTime) and
+             not na(latestBearishBarIndex) and
+             time > latestBearishTime and
+             close > latestBearishBodyHigh and
+             strongBullishDisplacement
+
+        if sameCandleBullishCisd
+            f_drawSetup(
+                 sweptLowTime,
+                 sweptLowPrice,
+                 latestBearishBarIndex,
+                 latestBearishBodyHigh,
+                 bar_index,
+                 1
+            )
+
+            bool canEnterLong =
+                 strategy.position_size == 0 and
+                 not createLongTrade and
+                 not createShortTrade and
+                 biasAllowsLong
+
+            if canEnterLong
+                createLongTrade := true
+                signalEntryPrice := close
+
+                signalStopPrice :=
+                     active15Low -
+                     syminfo.mintick * stopBufferTicks
+
+            pendingDirection := 0
+            pendingSweptLevel := na
+            pendingSweepExtreme := na
+            pendingSweepTime := na
+            pendingSweepCloseTime := na
+            pendingCisdPrice := na
+            pendingCisdTime := na
+            pendingCisdBarIndex := na
+            pendingCisdLocked := false
+            bearishMoveStarted := false
+            bullishMoveStarted := false
+
+        else
+            pendingDirection := 1
+
+            pendingSweptLevel := sweptLowPrice
+            pendingSweepExtreme := active15Low
+            pendingSweepTime := sweptLowTime
+            pendingSweepCloseTime := time
+
+            pendingCisdLocked := false
+            bearishMoveStarted := false
+            bullishMoveStarted := false
+
+            if close < open
+                pendingCisdPrice := open
+                pendingCisdTime := time
+                pendingCisdBarIndex := bar_index
+
+            else
+                pendingCisdPrice :=
+                     latestBearishBodyHigh
+
+                pendingCisdTime :=
+                     latestBearishTime
+
+                pendingCisdBarIndex :=
+                     latestBearishBarIndex
+
+    f_store15m(
+         active15Time,
+         active15High,
+         active15Low
+    )
+
+    active15Finalized := true
+
+//──────────────────────────────────────────────────────────────────────────────
+// Position sizing base values
+//──────────────────────────────────────────────────────────────────────────────
+
+float investedMargin =
+     strategy.equity *
+     (investmentPercent / 100.0)
+
+float positionValue =
+     investedMargin * leverage
+
+//──────────────────────────────────────────────────────────────────────────────
+// Execute immediate short entry
+//──────────────────────────────────────────────────────────────────────────────
+
+if createShortTrade and
+   not createLongTrade and
+   not na(signalEntryPrice) and
+   not na(signalStopPrice)
+
+    float shortRisk =
+         signalStopPrice - signalEntryPrice
+
+    if shortRisk > syminfo.mintick
+        float tradeQuantity =
+             positionValue / signalEntryPrice
+
+        tradeDirection := -1
+        tradeEntryPrice := signalEntryPrice
+        tradeStopLoss := signalStopPrice
+
+        tradeTarget :=
+             signalEntryPrice -
+             shortRisk * rrMultiple
+
+        strategy.entry(
+             "Short",
+             strategy.short,
+             qty = tradeQuantity
+        )
+
+        strategy.exit(
+             "Short Exit",
+             from_entry = "Short",
+             stop = tradeStopLoss,
+             limit = tradeTarget
+        )
+
+        if showPositionBlocks
+            currentRiskBox := box.new(
+                 left = bar_index,
+                 top = tradeStopLoss,
+                 right = bar_index + 1,
+                 bottom = tradeEntryPrice,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(STOP_COLOR, 35),
+                 bgcolor = color.new(STOP_COLOR, 85)
+            )
+
+            currentRewardBox := box.new(
+                 left = bar_index,
+                 top = tradeEntryPrice,
+                 right = bar_index + 1,
+                 bottom = tradeTarget,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(TARGET_COLOR, 35),
+                 bgcolor = color.new(TARGET_COLOR, 85)
+            )
+
+            f_saveBox(currentRiskBox)
+            f_saveBox(currentRewardBox)
+
+        if showEntryLine
+            currentEntryLine := line.new(
+                 x1 = bar_index,
+                 y1 = tradeEntryPrice,
+                 x2 = bar_index + 1,
+                 y2 = tradeEntryPrice,
+                 xloc = xloc.bar_index,
+                 color = ENTRY_COLOR,
+                 width = 1,
+                 style = line.style_dashed
+            )
+
+            f_saveLine(currentEntryLine)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Execute immediate long entry
+//──────────────────────────────────────────────────────────────────────────────
+
+if createLongTrade and
+   not createShortTrade and
+   not na(signalEntryPrice) and
+   not na(signalStopPrice)
+
+    float longRisk =
+         signalEntryPrice - signalStopPrice
+
+    if longRisk > syminfo.mintick
+        float tradeQuantity =
+             positionValue / signalEntryPrice
+
+        tradeDirection := 1
+        tradeEntryPrice := signalEntryPrice
+        tradeStopLoss := signalStopPrice
+
+        tradeTarget :=
+             signalEntryPrice +
+             longRisk * rrMultiple
+
+        strategy.entry(
+             "Long",
+             strategy.long,
+             qty = tradeQuantity
+        )
+
+        strategy.exit(
+             "Long Exit",
+             from_entry = "Long",
+             stop = tradeStopLoss,
+             limit = tradeTarget
+        )
+
+        if showPositionBlocks
+            currentRiskBox := box.new(
+                 left = bar_index,
+                 top = tradeEntryPrice,
+                 right = bar_index + 1,
+                 bottom = tradeStopLoss,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(STOP_COLOR, 35),
+                 bgcolor = color.new(STOP_COLOR, 85)
+            )
+
+            currentRewardBox := box.new(
+                 left = bar_index,
+                 top = tradeTarget,
+                 right = bar_index + 1,
+                 bottom = tradeEntryPrice,
+                 xloc = xloc.bar_index,
+                 border_color = color.new(TARGET_COLOR, 35),
+                 bgcolor = color.new(TARGET_COLOR, 85)
+            )
+
+            f_saveBox(currentRiskBox)
+            f_saveBox(currentRewardBox)
+
+        if showEntryLine
+            currentEntryLine := line.new(
+                 x1 = bar_index,
+                 y1 = tradeEntryPrice,
+                 x2 = bar_index + 1,
+                 y2 = tradeEntryPrice,
+                 xloc = xloc.bar_index,
+                 color = ENTRY_COLOR,
+                 width = 1,
+                 style = line.style_dashed
+            )
+
+            f_saveLine(currentEntryLine)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Maintain active exit
+//──────────────────────────────────────────────────────────────────────────────
+
+if strategy.position_size > 0 and
+   tradeDirection == 1
+
+    strategy.exit(
+         "Long Exit",
+         from_entry = "Long",
+         stop = tradeStopLoss,
+         limit = tradeTarget
+    )
+
+if strategy.position_size < 0 and
+   tradeDirection == -1
+
+    strategy.exit(
+         "Short Exit",
+         from_entry = "Short",
+         stop = tradeStopLoss,
+         limit = tradeTarget
+    )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Extend active position blocks
+//──────────────────────────────────────────────────────────────────────────────
+
+if strategy.position_size != 0
+    if not na(currentRiskBox)
+        box.set_right(
+             currentRiskBox,
+             bar_index
+        )
+
+    if not na(currentRewardBox)
+        box.set_right(
+             currentRewardBox,
+             bar_index
+        )
+
+    if not na(currentEntryLine)
+        line.set_x2(
+             currentEntryLine,
+             bar_index
+        )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Detect completed trade
+//──────────────────────────────────────────────────────────────────────────────
+
+bool newClosedTrade =
+     strategy.closedtrades > knownClosedTrades
+
+if newClosedTrade
+    knownClosedTrades := strategy.closedtrades
+
+    if not na(currentRiskBox)
+        box.set_right(
+             currentRiskBox,
+             bar_index
+        )
+
+    if not na(currentRewardBox)
+        box.set_right(
+             currentRewardBox,
+             bar_index
+        )
+
+    if not na(currentEntryLine)
+        line.set_x2(
+             currentEntryLine,
+             bar_index
+        )
+
+    tradeDirection := 0
+    tradeEntryPrice := na
+    tradeStopLoss := na
+    tradeTarget := na
+
+    currentRiskBox := na
+    currentRewardBox := na
+    currentEntryLine := na
+
+//──────────────────────────────────────────────────────────────────────────────
+// Update latest candle references
+//──────────────────────────────────────────────────────────────────────────────
+
+if isOneMinute and insideSession
+    if close > open
+        latestBullishBodyLow := open
+        latestBullishTime := time
+        latestBullishBarIndex := bar_index
+
+    else if close < open
+        latestBearishBodyHigh := open
+        latestBearishTime := time
+        latestBearishBarIndex := bar_index
+
+//──────────────────────────────────────────────────────────────────────────────
+// End-of-session handling
+//──────────────────────────────────────────────────────────────────────────────
+
+if sessionEnded
+    active15Time := na
+    active15High := na
+    active15Low := na
+    active15Close := na
+    active15Finalized := false
+
+    latestBullishBodyLow := na
+    latestBullishTime := na
+    latestBullishBarIndex := na
+
+    latestBearishBodyHigh := na
+    latestBearishTime := na
+    latestBearishBarIndex := na
+
+    pendingDirection := 0
+
+    pendingSweptLevel := na
+    pendingSweepExtreme := na
+    pendingSweepTime := na
+    pendingSweepCloseTime := na
+
+    pendingCisdPrice := na
+    pendingCisdTime := na
+    pendingCisdBarIndex := na
+
+    pendingCisdLocked := false
+    bearishMoveStarted := false
+    bullishMoveStarted := false
+
+    if closeAtSessionEnd and
+       strategy.position_size != 0
+
+        strategy.close_all(
+             comment = "Session End"
+        )
+
+//──────────────────────────────────────────────────────────────────────────────
+// Timeframe warning
+//──────────────────────────────────────────────────────────────────────────────
+
+var table warningTable =
+     table.new(
+          position.top_right,
+          1,
+          1
+     )
+
+if barstate.islast
+    if not isOneMinute
+        table.cell(
+             warningTable,
+             0,
+             0,
+             "Use on the 1-minute chart",
+             text_color = color.white,
+             bgcolor = color.red
+        )
+
+    else
+        table.clear(
+             warningTable,
+             0,
+             0,
+             0,
+             0
+        )
