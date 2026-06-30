@@ -408,9 +408,11 @@ while bi >= 0
         if tappedNow
             o.tapped := true
 
-            if isDn
-                o.anchor := open
-                o.anchorBar := bar_index
+            // Anchor the CISD at the tap candle's open regardless of its
+            // direction, so OBs that reverse immediately (no down candle
+            // after the tap) still produce a CISD.
+            o.anchor := open
+            o.anchorBar := bar_index
 
         if o.tapped and not o.done
             bool confirmed =
@@ -551,9 +553,11 @@ while ri >= 0
         if tappedNow
             o.tapped := true
 
-            if isUp
-                o.anchor := open
-                o.anchorBar := bar_index
+            // Anchor the CISD at the tap candle's open regardless of its
+            // direction, so OBs that reverse immediately (no up candle
+            // after the tap) still produce a CISD.
+            o.anchor := open
+            o.anchorBar := bar_index
 
         if o.tapped and not o.done
             bool confirmed =
