@@ -9,11 +9,12 @@
 //  -> consecutive opposing candles define CISD
 //  -> price confirms through CISD
 //
-//  OB filtering:
-//  - Remove invalidated OBs.
-//  - Remove OBs that are too old.
-//  - Remove OBs that are too far from current price.
-//  - Every surviving OB is drawn and tracks its own CISD independently.
+//  OB handling:
+//  - Every detected bullish and bearish OB is drawn and kept.
+//  - Each OB independently waits for its own tap, tracks its own candle
+//    run, and creates its own CISD (one CISD maximum per OB).
+//  - An OB is only removed when invalidated, and only when
+//    "Remove OB on invalidation" is enabled.
 //
 //  CISD:
 //  - Starts from the first candle of the delivery run.
@@ -75,33 +76,6 @@ removeInvalid = input.bool(
      "Remove OB on invalidation",
      group = gOB,
      tooltip = "Bullish OB invalidates below its bottom. Bearish OB invalidates above its top."
-)
-
-obMaxAge = input.int(
-     200,
-     "Maximum OB age in HTF candles",
-     minval = 1,
-     maxval = 5000,
-     group = gOB,
-     tooltip = "Older order blocks are removed. With 1H selected, 200 means approximately 200 hours."
-)
-
-obMaxDistanceATR = input.float(
-     10.0,
-     "Maximum distance from price (ATR)",
-     minval = 0.5,
-     maxval = 100.0,
-     step = 0.5,
-     group = gOB,
-     tooltip = "Removes order blocks whose midpoint is farther than this ATR multiple from current price."
-)
-
-distanceATRLength = input.int(
-     14,
-     "Distance ATR length",
-     minval = 1,
-     maxval = 200,
-     group = gOB
 )
 
 bullOBcol = input.color(
@@ -274,9 +248,6 @@ type OB
 
     float top = na
     float bottom = na
-    float midpoint = na
-
-    int createdTime = na
 
     bool bull = false
     bool tapped = false
@@ -301,19 +272,6 @@ var array<OB> bulls = array.new<OB>()
 var array<OB> bears = array.new<OB>()
 
 // ============================================================================
-// FILTER VALUES
-// ============================================================================
-
-float distanceATR = ta.atr(distanceATRLength)
-
-int htfSecondsRaw = timeframe.in_seconds(htf)
-
-int htfSeconds =
-     na(htfSecondsRaw) or htfSecondsRaw <= 0
-         ? timeframe.in_seconds(timeframe.period)
-         : htfSecondsRaw
-
-// ============================================================================
 // HELPERS
 // ============================================================================
 
@@ -326,34 +284,6 @@ f_deleteOB(OB o) =>
 
     if not na(o.clabel)
         label.delete(o.clabel)
-
-// Remove OBs that are too old or too far from current price.
-f_removeIrrelevantOBs(array<OB> objects) =>
-    int index = array.size(objects) - 1
-
-    while index >= 0
-        OB currentOB = array.get(objects, index)
-
-        float priceDistance =
-             math.abs(currentOB.midpoint - close)
-
-        bool tooFar =
-             not na(distanceATR) and
-             priceDistance > distanceATR * obMaxDistanceATR
-
-        int maximumAgeMilliseconds =
-             obMaxAge * htfSeconds * 1000
-
-        bool tooOld =
-             not na(currentOB.createdTime) and
-             time - currentOB.createdTime >
-             maximumAgeMilliseconds
-
-        if tooFar or tooOld
-            f_deleteOB(currentOB)
-            array.remove(objects, index)
-
-        index -= 1
 
 // ============================================================================
 // NEW ORDER BLOCKS
@@ -386,9 +316,6 @@ if newBull
     float normalizedBottom =
          math.min(bullTop, bullBot)
 
-    float zoneMidpoint =
-         math.avg(normalizedTop, normalizedBottom)
-
     box bx = box.new(
          left = bullLeft,
          top = normalizedTop,
@@ -404,8 +331,6 @@ if newBull
          zone = bx,
          top = normalizedTop,
          bottom = normalizedBottom,
-         midpoint = zoneMidpoint,
-         createdTime = bullLeft,
          bull = true
     )
 
@@ -417,9 +342,6 @@ if newBear
 
     float normalizedBottom =
          math.min(bearTop, bearBot)
-
-    float zoneMidpoint =
-         math.avg(normalizedTop, normalizedBottom)
 
     box bx = box.new(
          left = bearLeft,
@@ -436,16 +358,10 @@ if newBear
          zone = bx,
          top = normalizedTop,
          bottom = normalizedBottom,
-         midpoint = zoneMidpoint,
-         createdTime = bearLeft,
          bull = false
     )
 
     array.push(bears, newOB)
-
-// Filter on every bar so an OB is removed when it becomes old or too distant.
-f_removeIrrelevantOBs(bulls)
-f_removeIrrelevantOBs(bears)
 
 // ============================================================================
 // CANDLE DIRECTION
