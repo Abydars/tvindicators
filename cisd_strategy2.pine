@@ -68,6 +68,16 @@ float leverage = input.float(
 )
 
 //──────────────────────────────────────────────────────────────────────────────
+// Entry Quality Filter
+//──────────────────────────────────────────────────────────────────────────────
+
+bool cancelOnSweepExtremeInvalidation = input.bool(
+     true,
+     "Cancel if Sweep Extreme Is Invalidated",
+     group = "Entry Quality Filter"
+)
+
+//──────────────────────────────────────────────────────────────────────────────
 // Trading Sessions
 //──────────────────────────────────────────────────────────────────────────────
 
@@ -565,6 +575,35 @@ else
 // change to  htfBias < 0  and  htfBias > 0
 bool biasAllowsShort = not useBiasGate or htfBias <= 0
 bool biasAllowsLong  = not useBiasGate or htfBias >= 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// Cancel pending setup when the original sweep extreme is broken
+//──────────────────────────────────────────────────────────────────────────────
+
+bool pendingSweepExtremeInvalidated =
+     cancelOnSweepExtremeInvalidation and
+     pendingDirection != 0 and
+     not na(pendingSweepExtreme) and
+     (
+         (pendingDirection == -1 and high > pendingSweepExtreme) or
+         (pendingDirection == 1 and low < pendingSweepExtreme)
+     )
+
+if pendingSweepExtremeInvalidated
+    pendingDirection := 0
+
+    pendingSweptLevel := na
+    pendingSweepExtreme := na
+    pendingSweepTime := na
+    pendingSweepCloseTime := na
+
+    pendingCisdPrice := na
+    pendingCisdTime := na
+    pendingCisdBarIndex := na
+
+    pendingCisdLocked := false
+    bearishMoveStarted := false
+    bullishMoveStarted := false
 
 //──────────────────────────────────────────────────────────────────────────────
 // Pending bearish CISD

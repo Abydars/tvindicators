@@ -68,6 +68,70 @@ float leverage = input.float(
 )
 
 //──────────────────────────────────────────────────────────────────────────────
+// Entry Quality Filter
+//──────────────────────────────────────────────────────────────────────────────
+
+bool cancelOnSweepExtremeInvalidation = input.bool(
+     true,
+     "Cancel if Sweep Extreme Is Invalidated",
+     group = "Entry Quality Filter"
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Partial Take Profit
+//──────────────────────────────────────────────────────────────────────────────
+
+bool usePartialTP = input.bool(
+     false,
+     "Enable Partial TP + Break-Even",
+     group = "Partial Take Profit"
+)
+
+float partialTriggerR = input.float(
+     1.0,
+     "Partial TP at R Multiple",
+     minval = 0.1,
+     step = 0.1,
+     group = "Partial Take Profit"
+)
+
+float partialPercent = input.float(
+     50.0,
+     "Partial Size %",
+     minval = 1.0,
+     maxval = 99.0,
+     step = 5.0,
+     group = "Partial Take Profit"
+)
+
+bool moveToBE = input.bool(
+     false,
+     "Move Stop to Break-Even After Partial",
+     group = "Partial Take Profit"
+)
+
+float beOffsetR = input.float(
+     0.0,
+     "Break-Even Offset (R, + locks profit)",
+     step = 0.1,
+     group = "Partial Take Profit"
+)
+
+bool useBreakEven = input.bool(
+     false,
+     "Move Stop to BE (no partial)",
+     group = "Partial Take Profit"
+)
+
+float beTriggerR = input.float(
+     1.0,
+     "BE Trigger (R)",
+     minval = 0.1,
+     step = 0.1,
+     group = "Partial Take Profit"
+)
+
+//──────────────────────────────────────────────────────────────────────────────
 // Trading Sessions
 //──────────────────────────────────────────────────────────────────────────────
 
@@ -418,12 +482,14 @@ var int tradeDirection = 0
 var float tradeEntryPrice = na
 var float tradeStopLoss = na
 var float tradeTarget = na
+var float tradeRisk = na
+var float tradeFullQty = na
+var float partialLevel = na
+var bool beArmed = false
 
 var box currentRiskBox = na
 var box currentRewardBox = na
 var line currentEntryLine = na
-
-var int knownClosedTrades = 0
 
 //──────────────────────────────────────────────────────────────────────────────
 // Trade creation signals
@@ -565,6 +631,35 @@ else
 // change to  htfBias < 0  and  htfBias > 0
 bool biasAllowsShort = not useBiasGate or htfBias <= 0
 bool biasAllowsLong  = not useBiasGate or htfBias >= 0
+
+//──────────────────────────────────────────────────────────────────────────────
+// Cancel pending setup when the original sweep extreme is broken
+//──────────────────────────────────────────────────────────────────────────────
+
+bool pendingSweepExtremeInvalidated =
+     cancelOnSweepExtremeInvalidation and
+     pendingDirection != 0 and
+     not na(pendingSweepExtreme) and
+     (
+         (pendingDirection == -1 and high > pendingSweepExtreme) or
+         (pendingDirection == 1 and low < pendingSweepExtreme)
+     )
+
+if pendingSweepExtremeInvalidated
+    pendingDirection := 0
+
+    pendingSweptLevel := na
+    pendingSweepExtreme := na
+    pendingSweepTime := na
+    pendingSweepCloseTime := na
+
+    pendingCisdPrice := na
+    pendingCisdTime := na
+    pendingCisdBarIndex := na
+
+    pendingCisdLocked := false
+    bearishMoveStarted := false
+    bullishMoveStarted := false
 
 //──────────────────────────────────────────────────────────────────────────────
 // Pending bearish CISD
@@ -933,22 +1028,21 @@ if createShortTrade and
         tradeDirection := -1
         tradeEntryPrice := signalEntryPrice
         tradeStopLoss := signalStopPrice
+        tradeRisk := shortRisk
+        tradeFullQty := tradeQuantity
 
         tradeTarget :=
              signalEntryPrice -
              shortRisk * rrMultiple
 
+        partialLevel := usePartialTP
+             ? signalEntryPrice - shortRisk * partialTriggerR
+             : na
+
         strategy.entry(
              "Short",
              strategy.short,
              qty = tradeQuantity
-        )
-
-        strategy.exit(
-             "Short Exit",
-             from_entry = "Short",
-             stop = tradeStopLoss,
-             limit = tradeTarget
         )
 
         if showPositionBlocks
@@ -1008,22 +1102,21 @@ if createLongTrade and
         tradeDirection := 1
         tradeEntryPrice := signalEntryPrice
         tradeStopLoss := signalStopPrice
+        tradeRisk := longRisk
+        tradeFullQty := tradeQuantity
 
         tradeTarget :=
              signalEntryPrice +
              longRisk * rrMultiple
 
+        partialLevel := usePartialTP
+             ? signalEntryPrice + longRisk * partialTriggerR
+             : na
+
         strategy.entry(
              "Long",
              strategy.long,
              qty = tradeQuantity
-        )
-
-        strategy.exit(
-             "Long Exit",
-             from_entry = "Long",
-             stop = tradeStopLoss,
-             limit = tradeTarget
         )
 
         if showPositionBlocks
@@ -1065,28 +1158,81 @@ if createLongTrade and
             f_saveLine(currentEntryLine)
 
 //──────────────────────────────────────────────────────────────────────────────
-// Maintain active exit
+// Manage exits (same-bar protection + absolute-quantity partial TP)
 //──────────────────────────────────────────────────────────────────────────────
 
-if strategy.position_size > 0 and
-   tradeDirection == 1
+bool tradeJustCreated =
+     createLongTrade or createShortTrade
 
-    strategy.exit(
-         "Long Exit",
-         from_entry = "Long",
-         stop = tradeStopLoss,
-         limit = tradeTarget
-    )
+if tradeDirection != 0 and
+   (strategy.position_size != 0 or tradeJustCreated)
 
-if strategy.position_size < 0 and
-   tradeDirection == -1
+    bool isLong = tradeDirection == 1
+    string entryId = isLong ? "Long" : "Short"
 
-    strategy.exit(
-         "Short Exit",
-         from_entry = "Short",
-         stop = tradeStopLoss,
-         limit = tradeTarget
-    )
+    // Position size is still zero while the entry order is being created.
+    // Require an actual open position before treating a size reduction as TP1.
+    bool partialDone =
+         usePartialTP and
+         not na(tradeFullQty) and
+         strategy.position_size != 0 and
+         math.abs(strategy.position_size) < tradeFullQty * 0.99
+
+    float beStop =
+         tradeEntryPrice +
+         (isLong ? 1.0 : -1.0) * beOffsetR * tradeRisk
+
+    float runnerStop =
+         partialDone and moveToBE
+         ? beStop
+         : tradeStopLoss
+
+    if usePartialTP and not na(partialLevel)
+        float partialQty =
+             tradeFullQty * partialPercent / 100.0
+
+        if not partialDone
+            strategy.exit(
+                 isLong ? "L TP1" : "S TP1",
+                 from_entry = entryId,
+                 qty = partialQty,
+                 limit = partialLevel,
+                 stop = tradeStopLoss
+            )
+
+        // No qty: manages all quantity not reserved by TP1.
+        strategy.exit(
+             isLong ? "L Run" : "S Run",
+             from_entry = entryId,
+             limit = tradeTarget,
+             stop = runnerStop
+        )
+    else
+        // Break-even only: full size remains aimed at the final target.
+        float liveStop =
+             useBreakEven and beArmed
+             ? beStop
+             : tradeStopLoss
+
+        strategy.exit(
+             isLong ? "Long Exit" : "Short Exit",
+             from_entry = entryId,
+             stop = liveStop,
+             limit = tradeTarget
+        )
+
+        // Arm after submitting this bar's exit. The BE stop therefore starts
+        // from the next calculation rather than retroactively on the trigger bar.
+        if useBreakEven and
+           strategy.position_size != 0 and
+           not beArmed
+
+            float beTrig =
+                 tradeEntryPrice +
+                 (isLong ? 1.0 : -1.0) * beTriggerR * tradeRisk
+
+            if isLong ? high >= beTrig : low <= beTrig
+                beArmed := true
 
 //──────────────────────────────────────────────────────────────────────────────
 // Extend active position blocks
@@ -1112,15 +1258,14 @@ if strategy.position_size != 0
         )
 
 //──────────────────────────────────────────────────────────────────────────────
-// Detect completed trade
+// Finalize trade visuals when position goes flat
 //──────────────────────────────────────────────────────────────────────────────
 
-bool newClosedTrade =
-     strategy.closedtrades > knownClosedTrades
+bool justWentFlat =
+     strategy.position_size == 0 and
+     strategy.position_size[1] != 0
 
-if newClosedTrade
-    knownClosedTrades := strategy.closedtrades
-
+if justWentFlat
     if not na(currentRiskBox)
         box.set_right(
              currentRiskBox,
@@ -1143,6 +1288,10 @@ if newClosedTrade
     tradeEntryPrice := na
     tradeStopLoss := na
     tradeTarget := na
+    tradeRisk := na
+    tradeFullQty := na
+    partialLevel := na
+    beArmed := false
 
     currentRiskBox := na
     currentRewardBox := na

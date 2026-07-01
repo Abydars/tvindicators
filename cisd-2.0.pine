@@ -1,0 +1,547 @@
+//@version=6
+indicator(
+     "1m CISD + 15m Same-Candle Sweep Signals",
+     overlay = true,
+     max_lines_count = 500,
+     max_labels_count = 500
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// CISD settings
+//──────────────────────────────────────────────────────────────────────────────
+groupCisd = "1m CISD"
+
+bool showCisdBorders = input.bool(
+     true,
+     "Show CISD Borders",
+     group = groupCisd
+)
+
+int sourceCandlesToKeep = input.int(
+     300,
+     "Previous Source Candles to Track",
+     minval = 10,
+     maxval = 1000,
+     group = groupCisd
+)
+
+color buyCisdColor = input.color(
+     color.lime,
+     "Buy CISD Border",
+     group = groupCisd
+)
+
+color sellCisdColor = input.color(
+     color.red,
+     "Sell CISD Border",
+     group = groupCisd
+)
+
+int cisdWidth = input.int(
+     2,
+     "CISD Border Width",
+     minval = 1,
+     maxval = 5,
+     group = groupCisd
+)
+
+int maxCisdBorders = input.int(
+     300,
+     "CISD Borders to Keep",
+     minval = 10,
+     maxval = 450,
+     group = groupCisd,
+     tooltip = "Keep combined CISD and sweep border limits at 500 or lower."
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// 15m sweep settings
+//──────────────────────────────────────────────────────────────────────────────
+groupSweep = "15m Sweeps"
+
+string sweepTimeframe = input.timeframe(
+     "15",
+     "Sweep Timeframe",
+     group = groupSweep
+)
+
+bool showSweepBorders = input.bool(
+     true,
+     "Show Sweep Borders",
+     group = groupSweep
+)
+
+color highSweepColor = input.color(
+     color.orange,
+     "High Sweep Border",
+     group = groupSweep
+)
+
+color lowSweepColor = input.color(
+     color.aqua,
+     "Low Sweep Border",
+     group = groupSweep
+)
+
+int sweepWidth = input.int(
+     2,
+     "Sweep Border Width",
+     minval = 1,
+     maxval = 5,
+     group = groupSweep
+)
+
+int maxSweepBorders = input.int(
+     180,
+     "Sweep Borders to Keep",
+     minval = 10,
+     maxval = 450,
+     group = groupSweep,
+     tooltip = "Keep combined CISD and sweep border limits at 500 or lower."
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Pakistan sessions
+//──────────────────────────────────────────────────────────────────────────────
+groupSessions = "Pakistan Sessions"
+
+bool enableSession1 = input.bool(
+     true,
+     "Session 1: 11:00 AM – 2:00 PM",
+     group = groupSessions
+)
+
+bool enableSession2 = input.bool(
+     true,
+     "Session 2: 6:00 PM – 7:30 PM",
+     group = groupSessions
+)
+
+bool highlightSessions = input.bool(
+     true,
+     "Highlight Sessions",
+     group = groupSessions
+)
+
+color session1Color = input.color(
+     color.new(color.blue, 88),
+     "Session 1 Background",
+     group = groupSessions
+)
+
+color session2Color = input.color(
+     color.new(color.purple, 88),
+     "Session 2 Background",
+     group = groupSessions
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Signal settings
+//──────────────────────────────────────────────────────────────────────────────
+groupSignals = "Signals"
+
+bool showSignals = input.bool(
+     true,
+     "Show Long / Short Markers",
+     group = groupSignals
+)
+
+color longColor = input.color(
+     color.lime,
+     "Long Signal Color",
+     group = groupSignals
+)
+
+color shortColor = input.color(
+     color.red,
+     "Short Signal Color",
+     group = groupSignals
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Session detection
+//──────────────────────────────────────────────────────────────────────────────
+string pakistanTimezone = "Asia/Karachi"
+
+bool inSession1 =
+     timeframe.isintraday and
+     not na(
+         time(
+             timeframe.period,
+             "1100-1400:1234567",
+             pakistanTimezone
+         )
+     )
+
+bool inSession2 =
+     timeframe.isintraday and
+     not na(
+         time(
+             timeframe.period,
+             "1800-1930:1234567",
+             pakistanTimezone
+         )
+     )
+
+bool session1Active =
+     enableSession1 and inSession1
+
+bool session2Active =
+     enableSession2 and inSession2
+
+bool inTradingSession =
+     session1Active or session2Active
+
+bool sessionStarted =
+     inTradingSession and
+     not inTradingSession[1]
+
+bool sessionEnded =
+     not inTradingSession and
+     inTradingSession[1]
+
+color sessionBackground =
+     highlightSessions
+         ? session1Active
+             ? session1Color
+             : session2Active
+                 ? session2Color
+                 : na
+         : na
+
+bgcolor(
+     sessionBackground,
+     title = "Pakistan Trading Sessions"
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Drawing storage
+//──────────────────────────────────────────────────────────────────────────────
+var array<line> cisdLines = array.new<line>()
+var array<line> sweepLines = array.new<line>()
+
+f_storeCisdLine(line newLine) =>
+    array.push(cisdLines, newLine)
+
+    if array.size(cisdLines) > maxCisdBorders
+        line oldestLine = array.shift(cisdLines)
+        line.delete(oldestLine)
+
+f_storeSweepLine(line newLine) =>
+    array.push(sweepLines, newLine)
+
+    if array.size(sweepLines) > maxSweepBorders
+        line oldestLine = array.shift(sweepLines)
+        line.delete(oldestLine)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Candle direction
+//──────────────────────────────────────────────────────────────────────────────
+bool greenCandle = close > open
+bool redCandle = close < open
+
+//──────────────────────────────────────────────────────────────────────────────
+// Previous completed HTF candle information
+//
+// The time is used so the sweep line begins from the actual 15m candle whose
+// high or low was swept.
+//──────────────────────────────────────────────────────────────────────────────
+float previousHtfHigh = request.security(
+     syminfo.tickerid,
+     sweepTimeframe,
+     high[1],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_on
+)
+
+float previousHtfLow = request.security(
+     syminfo.tickerid,
+     sweepTimeframe,
+     low[1],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_on
+)
+
+int previousHtfTime = request.security(
+     syminfo.tickerid,
+     sweepTimeframe,
+     time[1],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_on
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Current HTF candle tracking
+//──────────────────────────────────────────────────────────────────────────────
+int currentHtfTime = time(sweepTimeframe)
+
+bool newHtfCandle =
+     ta.change(currentHtfTime) != 0
+
+var bool highAlreadySwept = false
+var bool lowAlreadySwept = false
+
+if newHtfCandle
+    highAlreadySwept := false
+    lowAlreadySwept := false
+
+//──────────────────────────────────────────────────────────────────────────────
+// Sweep detection
+//──────────────────────────────────────────────────────────────────────────────
+bool highSweep =
+     barstate.isconfirmed and
+     inTradingSession and
+     not highAlreadySwept and
+     not na(previousHtfHigh) and
+     high > previousHtfHigh
+
+bool lowSweep =
+     barstate.isconfirmed and
+     inTradingSession and
+     not lowAlreadySwept and
+     not na(previousHtfLow) and
+     low < previousHtfLow
+
+bool doubleSweep =
+     highSweep and lowSweep
+
+if highSweep
+    highAlreadySwept := true
+
+if lowSweep
+    lowAlreadySwept := true
+
+//──────────────────────────────────────────────────────────────────────────────
+// Previous candle body storage
+//──────────────────────────────────────────────────────────────────────────────
+var array<float> greenBodyLevels = array.new<float>()
+var array<int> greenBodyTimes = array.new<int>()
+
+var array<float> redBodyLevels = array.new<float>()
+var array<int> redBodyTimes = array.new<int>()
+
+// Only use source candles belonging to the active trading session.
+if sessionStarted
+    array.clear(greenBodyLevels)
+    array.clear(greenBodyTimes)
+    array.clear(redBodyLevels)
+    array.clear(redBodyTimes)
+
+if sessionEnded
+    array.clear(greenBodyLevels)
+    array.clear(greenBodyTimes)
+    array.clear(redBodyLevels)
+    array.clear(redBodyTimes)
+
+//──────────────────────────────────────────────────────────────────────────────
+// CISD detection
+//
+// Buy:
+// Current green candle closes above a previous red candle body high.
+//
+// Sell:
+// Current red candle closes below a previous green candle body low.
+//
+// The most recent valid broken opposite candle is selected.
+//──────────────────────────────────────────────────────────────────────────────
+bool buyCisd = false
+bool sellCisd = false
+
+float buyCisdLevel = na
+float sellCisdLevel = na
+
+int buyCisdSourceTime = na
+int sellCisdSourceTime = na
+
+int buyCisdSourceIndex = na
+int sellCisdSourceIndex = na
+
+if barstate.isconfirmed and inTradingSession and greenCandle and array.size(redBodyLevels) > 0
+    int i = array.size(redBodyLevels) - 1
+
+    while i >= 0
+        float sourceLevel = array.get(redBodyLevels, i)
+
+        if close > sourceLevel
+            buyCisd := true
+            buyCisdLevel := sourceLevel
+            buyCisdSourceTime := array.get(redBodyTimes, i)
+            buyCisdSourceIndex := i
+            break
+
+        i -= 1
+
+if barstate.isconfirmed and inTradingSession and redCandle and array.size(greenBodyLevels) > 0
+    int i = array.size(greenBodyLevels) - 1
+
+    while i >= 0
+        float sourceLevel = array.get(greenBodyLevels, i)
+
+        if close < sourceLevel
+            sellCisd := true
+            sellCisdLevel := sourceLevel
+            sellCisdSourceTime := array.get(greenBodyTimes, i)
+            sellCisdSourceIndex := i
+            break
+
+        i -= 1
+
+//──────────────────────────────────────────────────────────────────────────────
+// Same-candle signal confirmation
+//──────────────────────────────────────────────────────────────────────────────
+bool longSignal =
+     barstate.isconfirmed and
+     inTradingSession and
+     highSweep and
+     buyCisd and
+     not doubleSweep
+
+bool shortSignal =
+     barstate.isconfirmed and
+     inTradingSession and
+     lowSweep and
+     sellCisd and
+     not doubleSweep
+
+//──────────────────────────────────────────────────────────────────────────────
+// Draw sweep and CISD only when a signal exists
+//
+// Sweep:
+// Starts from the previous 15m candle whose level was swept.
+//
+// CISD:
+// Starts from the actual opposite-colored source candle.
+//
+// Both end at the confirmed signal candle.
+//──────────────────────────────────────────────────────────────────────────────
+if longSignal
+    if showSweepBorders and not na(previousHtfTime)
+        line longSweepLine = line.new(
+             x1 = previousHtfTime,
+             y1 = previousHtfHigh,
+             x2 = time_close,
+             y2 = previousHtfHigh,
+             xloc = xloc.bar_time,
+             extend = extend.none,
+             color = highSweepColor,
+             style = line.style_solid,
+             width = sweepWidth
+        )
+
+        f_storeSweepLine(longSweepLine)
+
+    if showCisdBorders and not na(buyCisdSourceTime)
+        line longCisdLine = line.new(
+             x1 = buyCisdSourceTime,
+             y1 = buyCisdLevel,
+             x2 = time_close,
+             y2 = buyCisdLevel,
+             xloc = xloc.bar_time,
+             extend = extend.none,
+             color = buyCisdColor,
+             style = line.style_solid,
+             width = cisdWidth
+        )
+
+        f_storeCisdLine(longCisdLine)
+
+if shortSignal
+    if showSweepBorders and not na(previousHtfTime)
+        line shortSweepLine = line.new(
+             x1 = previousHtfTime,
+             y1 = previousHtfLow,
+             x2 = time_close,
+             y2 = previousHtfLow,
+             xloc = xloc.bar_time,
+             extend = extend.none,
+             color = lowSweepColor,
+             style = line.style_solid,
+             width = sweepWidth
+        )
+
+        f_storeSweepLine(shortSweepLine)
+
+    if showCisdBorders and not na(sellCisdSourceTime)
+        line shortCisdLine = line.new(
+             x1 = sellCisdSourceTime,
+             y1 = sellCisdLevel,
+             x2 = time_close,
+             y2 = sellCisdLevel,
+             xloc = xloc.bar_time,
+             extend = extend.none,
+             color = sellCisdColor,
+             style = line.style_solid,
+             width = cisdWidth
+        )
+
+        f_storeCisdLine(shortCisdLine)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Remove consumed CISD source candles
+//──────────────────────────────────────────────────────────────────────────────
+if buyCisd and not na(buyCisdSourceIndex)
+    array.remove(redBodyLevels, buyCisdSourceIndex)
+    array.remove(redBodyTimes, buyCisdSourceIndex)
+
+if sellCisd and not na(sellCisdSourceIndex)
+    array.remove(greenBodyLevels, sellCisdSourceIndex)
+    array.remove(greenBodyTimes, sellCisdSourceIndex)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Signal markers
+//──────────────────────────────────────────────────────────────────────────────
+plotshape(
+     showSignals and longSignal,
+     title = "Long Signal",
+     text = "LONG",
+     style = shape.labelup,
+     location = location.belowbar,
+     color = longColor,
+     textcolor = color.white,
+     size = size.small
+)
+
+plotshape(
+     showSignals and shortSignal,
+     title = "Short Signal",
+     text = "SHORT",
+     style = shape.labeldown,
+     location = location.abovebar,
+     color = shortColor,
+     textcolor = color.white,
+     size = size.small
+)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Store current candle after CISD evaluation
+//──────────────────────────────────────────────────────────────────────────────
+if inTradingSession and greenCandle
+    array.push(greenBodyLevels, open)
+    array.push(greenBodyTimes, time)
+
+    if array.size(greenBodyLevels) > sourceCandlesToKeep
+        array.shift(greenBodyLevels)
+        array.shift(greenBodyTimes)
+
+if inTradingSession and redCandle
+    array.push(redBodyLevels, open)
+    array.push(redBodyTimes, time)
+
+    if array.size(redBodyLevels) > sourceCandlesToKeep
+        array.shift(redBodyLevels)
+        array.shift(redBodyTimes)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Alerts
+//──────────────────────────────────────────────────────────────────────────────
+alertcondition(
+     longSignal,
+     title = "Long Signal",
+     message = "A 15m high sweep and bullish CISD occurred on the same 1m candle during a Pakistan session."
+)
+
+alertcondition(
+     shortSignal,
+     title = "Short Signal",
+     message = "A 15m low sweep and bearish CISD occurred on the same 1m candle during a Pakistan session."
+)
