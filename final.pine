@@ -1,0 +1,642 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0
+// at https://mozilla.org/MPL/2.0/
+//
+// Original CISD script © AlgoAlpha
+// Only draws sweep and CISD levels when a combined entry signal is confirmed.
+// Entry signal prints on the first 1m candle after the 15m candle closes.
+
+//@version=6
+indicator(
+     title="CISD + 15m Sweep",
+     shorttitle="CISD + Sweep PK Sessions",
+     overlay=true,
+     max_lines_count=500,
+     max_labels_count=500,
+     behind_chart=false)
+
+//=============================================================================
+// PAKISTAN SESSIONS
+//=============================================================================
+
+sessionTimezone = input.string(
+     "Asia/Karachi",
+     "Session Timezone",
+     group="Pakistan Sessions")
+
+pakistanSessionOne = input.session(
+     "1200-1400",
+     "Session 1 — 12:00 PM to 2:00 PM",
+     group="Pakistan Sessions")
+
+pakistanSessionTwo = input.session(
+     "1800-1930",
+     "Session 2 — 6:00 PM to 7:30 PM",
+     group="Pakistan Sessions")
+
+highlightSessions = input.bool(
+     true,
+     "Highlight Sessions",
+     group="Pakistan Sessions")
+
+sessionBackgroundColor = input.color(
+     color.new(color.blue, 90),
+     "Session Highlight Colour",
+     group="Pakistan Sessions")
+
+bool inPakistanSessionOne =
+     not na(time(timeframe.period, pakistanSessionOne, sessionTimezone))
+
+bool inPakistanSessionTwo =
+     not na(time(timeframe.period, pakistanSessionTwo, sessionTimezone))
+
+bool inPakistanSession =
+     inPakistanSessionOne or inPakistanSessionTwo
+
+bool sessionJustEnded =
+     not inPakistanSession and inPakistanSession[1]
+
+bgcolor(
+     highlightSessions and inPakistanSession
+         ? sessionBackgroundColor
+         : na,
+     title="Pakistan Sessions")
+
+//=============================================================================
+// CISD INPUTS
+//=============================================================================
+
+cisdTolerance = input.float(
+     0.7,
+     "Noise Filter",
+     group="CISD — Calculations",
+     tooltip="Determines which levels to use as CISD triggers. A larger setting results in less noise.",
+     maxval=1.0,
+     minval=0.0,
+     step=0.1)
+
+cisdBullColor = input.color(
+     #00ffbb,
+     "Bullish CISD Colour",
+     group="CISD — Appearance")
+
+cisdBearColor = input.color(
+     #ff1100,
+     "Bearish CISD Colour",
+     group="CISD — Appearance")
+
+showSignalCisdLevels = input.bool(
+     true,
+     "Show CISD For Signals",
+     group="CISD — Appearance")
+
+cisdLineThickness = input.int(
+     3,
+     "CISD Line Thickness",
+     group="CISD — Appearance",
+     minval=1,
+     maxval=5)
+
+//=============================================================================
+// SWEEP INPUTS
+//=============================================================================
+
+sweepTimeframe = input.timeframe(
+     "15",
+     "Sweep Timeframe",
+     group="Wick Sweep — Settings")
+
+sweepLookback = input.int(
+     15,
+     "Previous Wicks Lookback",
+     group="Wick Sweep — Settings",
+     tooltip="Search this many previous sweep-timeframe candles for an untouched wick.",
+     minval=1,
+     maxval=100)
+
+requireSweepReclaim = input.bool(
+     false,
+     "Require Close Back Beyond Swept Wick",
+     group="Wick Sweep — Settings",
+     tooltip="Bullish sweep requires price back above the swept low. Bearish sweep requires price back below the swept high.")
+
+showSignalSweeps = input.bool(
+     true,
+     "Show Sweep For Signals",
+     group="Wick Sweep — Appearance")
+
+sweepBullColor = input.color(
+     color.aqua,
+     "Bull Sweep Colour",
+     group="Wick Sweep — Appearance")
+
+sweepBearColor = input.color(
+     color.red,
+     "Bear Sweep Colour",
+     group="Wick Sweep — Appearance")
+
+sweepLineThickness = input.int(
+     2,
+     "Sweep Line Thickness",
+     group="Wick Sweep — Appearance",
+     minval=1,
+     maxval=5)
+
+enableSweepAlerts = input.bool(
+     true,
+     "Enable Sweep Alerts",
+     group="Wick Sweep — Alerts")
+
+//=============================================================================
+// ENTRY INPUTS
+//=============================================================================
+
+showEntrySignals = input.bool(
+     true,
+     "Show Entry Signals",
+     group="Entries — Settings")
+
+longEntryColor = input.color(
+     color.lime,
+     "Long Entry Colour",
+     group="Entries — Appearance")
+
+shortEntryColor = input.color(
+     color.red,
+     "Short Entry Colour",
+     group="Entries — Appearance")
+
+entryTextColor = input.color(
+     color.white,
+     "Entry Text Colour",
+     group="Entries — Appearance")
+
+entryLabelSizeInput = input.string(
+     "Small",
+     "Entry Label Size",
+     options=["Tiny", "Small", "Normal", "Large"],
+     group="Entries — Appearance")
+
+enableEntryAlerts = input.bool(
+     true,
+     "Enable Entry Alerts",
+     group="Entries — Alerts")
+
+entryLabelSize =
+     entryLabelSizeInput == "Tiny"
+         ? size.tiny
+         : entryLabelSizeInput == "Normal"
+             ? size.normal
+             : entryLabelSizeInput == "Large"
+                 ? size.large
+                 : size.small
+
+//=============================================================================
+// CONFIRMED HIGHER-TIMEFRAME SWEEP FUNCTIONS
+//
+// Candle [1] is the completed sweep candle.
+// Candles [2] onward are possible source-wick candles.
+//=============================================================================
+
+findConfirmedBearSweep(int lookback, bool requireReclaim) =>
+    bool found = false
+    float foundLevel = na
+    int foundSourceTime = na
+
+    if bar_index > lookback + 1
+        for i = 2 to lookback + 1
+            float candidateHigh = high[i]
+            bool untouched = true
+
+            if i > 2
+                for j = 2 to i - 1
+                    if high[j] > candidateHigh
+                        untouched := false
+
+            bool wickTaken =
+                 high[1] > candidateHigh
+
+            bool reclaimValid =
+                 not requireReclaim or close[1] < candidateHigh
+
+            if not found and untouched and wickTaken and reclaimValid
+                found := true
+                foundLevel := candidateHigh
+                foundSourceTime := time[i]
+
+    [found, foundLevel, foundSourceTime]
+
+findConfirmedBullSweep(int lookback, bool requireReclaim) =>
+    bool found = false
+    float foundLevel = na
+    int foundSourceTime = na
+
+    if bar_index > lookback + 1
+        for i = 2 to lookback + 1
+            float candidateLow = low[i]
+            bool untouched = true
+
+            if i > 2
+                for j = 2 to i - 1
+                    if low[j] < candidateLow
+                        untouched := false
+
+            bool wickTaken =
+                 low[1] < candidateLow
+
+            bool reclaimValid =
+                 not requireReclaim or close[1] > candidateLow
+
+            if not found and untouched and wickTaken and reclaimValid
+                found := true
+                foundLevel := candidateLow
+                foundSourceTime := time[i]
+
+    [found, foundLevel, foundSourceTime]
+
+//=============================================================================
+// CISD POTENTIAL LEVELS
+//=============================================================================
+
+var array<float> bearishPotentialLevels = array.new_float()
+var array<float> bullishPotentialLevels = array.new_float()
+
+// Bearish CISD source.
+if close[1] < open[1] and close > open
+    array.unshift(bearishPotentialLevels, float(bar_index))
+    array.unshift(bearishPotentialLevels, open)
+
+// Bullish CISD source.
+if close[1] > open[1] and close < open
+    array.unshift(bullishPotentialLevels, float(bar_index))
+    array.unshift(bullishPotentialLevels, open)
+
+int cisdSignal = 0
+float cisdOriginLevel = na
+int cisdOriginIndex = na
+
+//=============================================================================
+// BEARISH CISD DETECTION
+//=============================================================================
+
+if array.size(bearishPotentialLevels) > 0
+    bool continueBearLoop = true
+
+    while continueBearLoop
+        float candidateLevel =
+             array.first(bearishPotentialLevels)
+
+        int candidateIndex =
+             int(array.get(bearishPotentialLevels, 1))
+
+        if close < candidateLevel
+            float highestClose = 0.0
+            int barsFromCandidate =
+                 bar_index - candidateIndex
+
+            for i = 0 to barsFromCandidate
+                if close[i] > highestClose
+                    highestClose := close[i]
+
+            bool continueSourceSearch = true
+            int sourceOffset =
+                 barsFromCandidate + 1
+
+            float sourceTop = 0.0
+
+            while continueSourceSearch and sourceOffset <= bar_index
+                if close[sourceOffset] < open[sourceOffset]
+                    sourceTop := open[sourceOffset]
+                    sourceOffset += 1
+                else
+                    continueSourceSearch := false
+
+            float denominator =
+                 sourceTop - candidateLevel
+
+            bool validBearCisd =
+                 denominator != 0 and
+                 (highestClose - candidateLevel) / denominator >
+                 cisdTolerance
+
+            if validBearCisd
+                cisdOriginLevel := candidateLevel
+                cisdOriginIndex := candidateIndex
+
+                array.clear(bearishPotentialLevels)
+
+                cisdSignal := 1
+                continueBearLoop := false
+            else
+                array.shift(bearishPotentialLevels)
+                array.shift(bearishPotentialLevels)
+
+                if array.size(bearishPotentialLevels) == 0
+                    continueBearLoop := false
+        else
+            continueBearLoop := false
+
+//=============================================================================
+// BULLISH CISD DETECTION
+//=============================================================================
+
+if array.size(bullishPotentialLevels) > 0
+    bool continueBullLoop = true
+
+    while continueBullLoop
+        float candidateLevel =
+             array.first(bullishPotentialLevels)
+
+        int candidateIndex =
+             int(array.get(bullishPotentialLevels, 1))
+
+        if close > candidateLevel
+            float lowestClose = close
+            int barsFromCandidate =
+                 bar_index - candidateIndex
+
+            for i = 0 to barsFromCandidate
+                if close[i] < lowestClose
+                    lowestClose := close[i]
+
+            bool continueSourceSearch = true
+            int sourceOffset =
+                 barsFromCandidate + 1
+
+            float sourceBottom = 0.0
+
+            while continueSourceSearch and sourceOffset <= bar_index
+                if close[sourceOffset] > open[sourceOffset]
+                    sourceBottom := open[sourceOffset]
+                    sourceOffset += 1
+                else
+                    continueSourceSearch := false
+
+            float denominator =
+                 candidateLevel - sourceBottom
+
+            bool validBullCisd =
+                 denominator != 0 and
+                 (candidateLevel - lowestClose) / denominator >
+                 cisdTolerance
+
+            if validBullCisd
+                cisdOriginLevel := candidateLevel
+                cisdOriginIndex := candidateIndex
+
+                array.clear(bullishPotentialLevels)
+
+                cisdSignal := 2
+                continueBullLoop := false
+            else
+                array.shift(bullishPotentialLevels)
+                array.shift(bullishPotentialLevels)
+
+                if array.size(bullishPotentialLevels) == 0
+                    continueBullLoop := false
+        else
+            continueBullLoop := false
+
+//=============================================================================
+// TIMEFRAME DATA
+//=============================================================================
+
+float chartTimeframeSeconds =
+     timeframe.in_seconds(timeframe.period)
+
+float selectedSweepTimeframeSeconds =
+     timeframe.in_seconds(sweepTimeframe)
+
+bool selectedSweepTimeframeIsHigher =
+     selectedSweepTimeframeSeconds > chartTimeframeSeconds
+
+int currentSweepCandleOpenTime = request.security(
+     syminfo.tickerid,
+     sweepTimeframe,
+     time,
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+int completedSweepCandleOpenTime = request.security(
+     syminfo.tickerid,
+     sweepTimeframe,
+     time[1],
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off)
+
+bool newSweepTimeframeCandle =
+     ta.change(currentSweepCandleOpenTime) != 0
+
+//=============================================================================
+// CONFIRMED SWEEP DATA
+//=============================================================================
+
+[confirmedBearSweepRaw, confirmedBearSweepLevel, confirmedBearSourceTime] = request.security(syminfo.tickerid, sweepTimeframe, findConfirmedBearSweep(sweepLookback, requireSweepReclaim), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+[confirmedBullSweepRaw, confirmedBullSweepLevel, confirmedBullSourceTime] = request.security(syminfo.tickerid, sweepTimeframe, findConfirmedBullSweep(sweepLookback, requireSweepReclaim), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+//=============================================================================
+// STORE CISD DATA INSIDE EACH DEVELOPING HTF CANDLE
+//=============================================================================
+
+var bool bullishCisdSeenCurrent = false
+var bool bearishCisdSeenCurrent = false
+
+var int bullishCisdSignalBarCurrent = na
+var int bearishCisdSignalBarCurrent = na
+
+var int bullishCisdOriginBarCurrent = na
+var int bearishCisdOriginBarCurrent = na
+
+var float bullishCisdLevelCurrent = na
+var float bearishCisdLevelCurrent = na
+
+// Values copied from the completed HTF candle.
+bool bullishCisdSeenClosed = false
+bool bearishCisdSeenClosed = false
+
+int bullishCisdSignalBarClosed = na
+int bearishCisdSignalBarClosed = na
+
+int bullishCisdOriginBarClosed = na
+int bearishCisdOriginBarClosed = na
+
+float bullishCisdLevelClosed = na
+float bearishCisdLevelClosed = na
+
+if selectedSweepTimeframeIsHigher and newSweepTimeframeCandle
+    bullishCisdSeenClosed := bullishCisdSeenCurrent
+    bearishCisdSeenClosed := bearishCisdSeenCurrent
+
+    bullishCisdSignalBarClosed := bullishCisdSignalBarCurrent
+    bearishCisdSignalBarClosed := bearishCisdSignalBarCurrent
+
+    bullishCisdOriginBarClosed := bullishCisdOriginBarCurrent
+    bearishCisdOriginBarClosed := bearishCisdOriginBarCurrent
+
+    bullishCisdLevelClosed := bullishCisdLevelCurrent
+    bearishCisdLevelClosed := bearishCisdLevelCurrent
+
+    bullishCisdSeenCurrent := false
+    bearishCisdSeenCurrent := false
+
+    bullishCisdSignalBarCurrent := na
+    bearishCisdSignalBarCurrent := na
+
+    bullishCisdOriginBarCurrent := na
+    bearishCisdOriginBarCurrent := na
+
+    bullishCisdLevelCurrent := na
+    bearishCisdLevelCurrent := na
+
+// Store first bullish CISD inside the developing HTF candle.
+if inPakistanSession and cisdSignal == 2 and not bullishCisdSeenCurrent
+    bullishCisdSeenCurrent := true
+    bullishCisdSignalBarCurrent := bar_index
+    bullishCisdOriginBarCurrent := cisdOriginIndex
+    bullishCisdLevelCurrent := cisdOriginLevel
+
+// Store first bearish CISD inside the developing HTF candle.
+if inPakistanSession and cisdSignal == 1 and not bearishCisdSeenCurrent
+    bearishCisdSeenCurrent := true
+    bearishCisdSignalBarCurrent := bar_index
+    bearishCisdOriginBarCurrent := cisdOriginIndex
+    bearishCisdLevelCurrent := cisdOriginLevel
+
+if sessionJustEnded
+    bullishCisdSeenCurrent := false
+    bearishCisdSeenCurrent := false
+
+    bullishCisdSignalBarCurrent := na
+    bearishCisdSignalBarCurrent := na
+
+    bullishCisdOriginBarCurrent := na
+    bearishCisdOriginBarCurrent := na
+
+    bullishCisdLevelCurrent := na
+    bearishCisdLevelCurrent := na
+
+//=============================================================================
+// COMBINED SIGNAL LOGIC
+//
+// Confirmation occurs on the first 1m candle of the next 15m period.
+// Therefore, the entry marker is placed on the current candle.
+//=============================================================================
+
+bool longEntry =
+     selectedSweepTimeframeIsHigher and
+     newSweepTimeframeCandle and
+     confirmedBullSweepRaw and
+     bullishCisdSeenClosed and
+     not na(bullishCisdSignalBarClosed)
+
+bool shortEntry =
+     selectedSweepTimeframeIsHigher and
+     newSweepTimeframeCandle and
+     confirmedBearSweepRaw and
+     bearishCisdSeenClosed and
+     not na(bearishCisdSignalBarClosed)
+
+//=============================================================================
+// DRAW ONLY THE SWEEP AND CISD USED BY A LONG SIGNAL
+//=============================================================================
+
+if longEntry
+    if showSignalSweeps and not na(confirmedBullSourceTime)
+        line.new(
+             x1=confirmedBullSourceTime,
+             y1=confirmedBullSweepLevel,
+             x2=completedSweepCandleOpenTime,
+             y2=confirmedBullSweepLevel,
+             xloc=xloc.bar_time,
+             extend=extend.none,
+             color=sweepBullColor,
+             width=sweepLineThickness)
+
+    if showSignalCisdLevels and not na(bullishCisdOriginBarClosed)
+        line.new(
+             x1=bullishCisdOriginBarClosed,
+             y1=bullishCisdLevelClosed,
+             x2=bullishCisdSignalBarClosed,
+             y2=bullishCisdLevelClosed,
+             xloc=xloc.bar_index,
+             extend=extend.none,
+             color=cisdBullColor,
+             width=cisdLineThickness)
+
+    if showEntrySignals
+        label.new(
+             x=bar_index,
+             y=low,
+             text="LONG",
+             xloc=xloc.bar_index,
+             yloc=yloc.belowbar,
+             style=label.style_label_up,
+             color=longEntryColor,
+             textcolor=entryTextColor,
+             size=entryLabelSize)
+
+//=============================================================================
+// DRAW ONLY THE SWEEP AND CISD USED BY A SHORT SIGNAL
+//=============================================================================
+
+if shortEntry
+    if showSignalSweeps and not na(confirmedBearSourceTime)
+        line.new(
+             x1=confirmedBearSourceTime,
+             y1=confirmedBearSweepLevel,
+             x2=completedSweepCandleOpenTime,
+             y2=confirmedBearSweepLevel,
+             xloc=xloc.bar_time,
+             extend=extend.none,
+             color=sweepBearColor,
+             width=sweepLineThickness)
+
+    if showSignalCisdLevels and not na(bearishCisdOriginBarClosed)
+        line.new(
+             x1=bearishCisdOriginBarClosed,
+             y1=bearishCisdLevelClosed,
+             x2=bearishCisdSignalBarClosed,
+             y2=bearishCisdLevelClosed,
+             xloc=xloc.bar_index,
+             extend=extend.none,
+             color=cisdBearColor,
+             width=cisdLineThickness)
+
+    if showEntrySignals
+        label.new(
+             x=bar_index,
+             y=high,
+             text="SHORT",
+             xloc=xloc.bar_index,
+             yloc=yloc.abovebar,
+             style=label.style_label_down,
+             color=shortEntryColor,
+             textcolor=entryTextColor,
+             size=entryLabelSize)
+
+//=============================================================================
+// ALERTS
+//
+// Alerts and labels both occur on the 12:30 candle when the 12:15–12:30
+// sweep candle has closed.
+//=============================================================================
+
+alertcondition(
+     longEntry and enableEntryAlerts,
+     title="Long Entry",
+     message="Bullish 15m sweep with bullish 1m CISD confirmed at the 15m candle close.")
+
+alertcondition(
+     shortEntry and enableEntryAlerts,
+     title="Short Entry",
+     message="Bearish 15m sweep with bearish 1m CISD confirmed at the 15m candle close.")
+
+alertcondition(
+     longEntry and enableSweepAlerts,
+     title="Bullish Signal Sweep",
+     message="Bullish sweep used for a confirmed LONG signal.")
+
+alertcondition(
+     shortEntry and enableSweepAlerts,
+     title="Bearish Signal Sweep",
+     message="Bearish sweep used for a confirmed SHORT signal.")
